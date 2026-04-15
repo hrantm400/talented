@@ -8,7 +8,7 @@
     "build": "tsx script/build.ts",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "test": "node --test --import tsx server/pipeline/ffmpeg.test.ts server/pipeline/gemini.test.ts",
+    "test": "node --test --import tsx server/pipeline/ffmpeg.test.ts server/pipeline/gemini.test.ts server/auth.test.ts",
     "verify:local": "npm run check && npm run build",
     "smoke:prod": "npm run build && tsx script/smoke-prod.ts",
     "db:create": "tsx script/create-db.ts",
