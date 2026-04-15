@@ -12,6 +12,7 @@ import {
   generateVoiceover,
 } from "./elevenlabs/voiceover";
 import { generateViralVoiceoverScript } from "./voiceover-script/openrouter";
+import { boss } from "./queue";
 import { runAutomatedShort } from "./automated-shorts/orchestrator";
 import * as assetsStorage from "./assets/storage";
 import {
@@ -588,7 +589,7 @@ export async function registerRoutes(
 
           const voiceId = req.body.voiceId?.trim() || undefined;
 
-          const result = await runAutomatedShort({
+          const config = {
             userId: req.user?.id || null,
             fullVideoUrl,
             fullVideoPath: fullFile?.path,
@@ -604,8 +605,20 @@ export async function registerRoutes(
             hookEnabled: !!tab.hookEnabled,
             captionStyle,
             voiceId,
-          });
-          results.push(result);
+          };
+
+          if (boss) {
+            try {
+              await boss.send('automated-short', { config });
+              results.push({ project: { id: Date.now(), name: config.projectName } as any, fullVideoPublicPath: undefined });
+              continue;
+            } catch (e) {
+              console.error("Failed to queue automated short:", e);
+            }
+          }
+          // Fallback to synchronous execution
+          const result = await runAutomatedShort(config as any);
+          results.push(result as any);
         }
 
         res.status(201).json({ projects: results.map((r) => r.project), fullVideoPaths: results.map((r) => r.fullVideoPublicPath) });

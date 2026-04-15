@@ -110,9 +110,21 @@ function cleanupTempFiles(tempFiles: string[]) {
   }
 }
 
-export function queuePipeline(projectId: number) {
-  pipelineLimit(() => runPipeline(projectId)).catch((err) => {
-    console.error(`Unhandled pipeline queue error for project ${projectId}:`, err);
+import { boss } from "../queue";
+
+export async function queuePipeline(projectId: number) {
+  if (boss) {
+    try {
+      await boss.send('video-pipeline', { projectId });
+      console.log(`Enqueued video-pipeline job for project ${projectId}`);
+      return;
+    } catch (err) {
+      console.error(`Failed to enqueue pipeline for project ${projectId}:`, err);
+    }
+  }
+  // Fallback to local limit if boss fails or is missing
+  pipelineLimit(() => runPipeline(projectId)).catch((e) => {
+    console.error(`Unhandled pipeline queue error for project ${projectId}:`, e);
   });
 }
 

@@ -187,12 +187,27 @@ export async function smartCropVideo(
   outputPath: string,
   duration: number
 ): Promise<void> {
+  // Step 1: Run Python face tracker
+  const pythonScript = path.join(process.cwd(), "server", "pipeline", "face_tracker.py");
+  let cropX = "iw/2-ih*9/32"; // default center crop
+
+  try {
+    const { stdout } = await execFileAsync("python3", [pythonScript, sourceVideoPath]);
+    const result = JSON.parse(stdout);
+    if (result.crop_x !== undefined) {
+      cropX = result.crop_x.toString();
+      console.log(`SmartCrop: Target face at X=${cropX}`);
+    }
+  } catch (err) {
+    console.error("Failed to run face tracking, falling back to center crop:", err);
+  }
+
+  // Step 2: Crop using FFmpeg
   const args = [
     "-y",
     "-i", sourceVideoPath,
-    "-vf", "crop=ih*9/16:ih:iw/2-ih*9/32:0,scale=1080:1920",
+    "-vf", `crop=ih*9/16:ih:${cropX}:0,scale=1080:1920`,
     "-c:v", "libx264",
-    "-crf", "23",
     "-crf", "23",
     "-c:a", "copy",
     "-t", duration.toString(),

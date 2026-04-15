@@ -42,6 +42,7 @@ import { ProjectCard } from "@/components/ProjectCard";
 
 const DEFAULT_VOICE_KEY = "elevenlabs_default_voice_id";
 import { CaptionStyleSelector } from "@/components/caption-styles";
+import { VideoTimeline } from "@/components/video-timeline";
 
 type BgMusicAsset = { id: number; name: string };
 type LogoAsset = { id: number; name: string };
@@ -488,6 +489,19 @@ export default function AutomatedShortsPage() {
 
         <CaptionStyleSelector selected={captionStyle} onSelect={setCaptionStyle} />
       </Card>
+
+      <div className="mt-4">
+        <VideoTimeline
+          duration={60}
+          currentTime={15}
+          onTimeChange={(time) => console.log('Time changed to', time)}
+          highlights={[{ id: '1', start: 10, end: 30 }]}
+          onHighlightAdjust={(id, start, end) => console.log('Adjusting highlight', id, start, end)}
+        />
+        <p className="text-xs text-muted-foreground mt-2">
+          (Preview: The advanced timeline editor allows manual adjustment of highlight timecodes before rendering)
+        </p>
+      </div>
 
       <div className="space-y-4">
         <div className="flex items-center justify-between">

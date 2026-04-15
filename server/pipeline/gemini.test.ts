@@ -2,12 +2,11 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { extractHighlights } from "./gemini";
 import { db } from "../db";
-import { db } from "../db";
 
 const originalFetch = globalThis.fetch;
 
 describe("extractHighlights (OpenRouter parsing)", () => {
-  let originalDbSelect;
+  let originalDbSelect: any;
   before(() => {
     originalDbSelect = db.select;
     db.select = () => {
@@ -21,14 +20,6 @@ describe("extractHighlights (OpenRouter parsing)", () => {
   });
   after(() => {
     db.select = originalDbSelect;
-  });
-  before(() => {
-    db.select = () => ({
-      from: () => ({
-        limit: () => [{ defaultModelVideo: 'test-model', openrouterApiKey: 'test-key' }],
-        where: () => [{ defaultModelVideo: 'test-model', openrouterApiKey: 'test-key' }]
-      })
-    }) as any;
   });
   before(() => {
     process.env.OPENROUTER_API_KEY = "test-key";
