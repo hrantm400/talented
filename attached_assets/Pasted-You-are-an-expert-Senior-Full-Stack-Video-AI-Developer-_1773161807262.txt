@@ -1,0 +1,38 @@
+You are an expert Senior Full-Stack Video AI Developer. Your task is to build an automated web application (Next.js + Node.js/Python backend) that converts long horizontal videos into highly dynamic 9:16 vertical Shorts/Reels, synchronized to a provided voiceover track.
+​TECH STACK:
+​Frontend & Video Rendering: React, Next.js, Remotion.
+​Backend Logic & Audio Processing: Node.js (or Python), FFmpeg.
+​AI Models: Google Gemini 3.1 Flash API (for video content analysis), Local Whisper (for audio transcription).
+​PROJECT WORKFLOW & REQUIREMENTS:
+​The system must automatically execute the following pipeline when a user uploads source_video.mp4, voiceover.mp3, bg_music.mp3, and logo.png:
+​STEP 1: Transcription (Local Whisper)
+​Process voiceover.mp3 using a local instance of Whisper (e.g., faster-whisper).
+​Output: Calculate the exact total duration of the voiceover.
+​Output: Generate a JSON file containing word-level timestamps (word, start, end) for dynamic captions.
+​STEP 2: Video Curation (Gemini 3.1 Flash API)
+​Send source_video.mp4 and the text transcript of the voiceover to the Gemini 3.1 Flash API.
+​Prompt Gemini to find the most engaging, action-packed, or highly emotional segments (e.g., jury reactions, main action) from the source video that match the exact total duration of the voiceover.
+​Output: A JSON array of timecodes [{start: "00:10", end: "00:15"}, ...].
+​STEP 3: Audio Engineering (FFmpeg)
+​Write an FFmpeg script/wrapper to process and mix the audio tracks precisely:
+​Original source_video.mp4 audio: Set volume to 0 (completely muted).
+​voiceover.mp3: Increase volume by +10dB.
+​bg_music.mp3: Decrease volume by -10dB AND increase playback speed to 1.1x (to avoid copyright detection).
+​Merge these into a single mixed_audio.wav file matching the length of the voiceover.
+​STEP 4: Visual Composition (Remotion)
+​Create a Remotion composition with a 9:16 aspect ratio (1080x1920) at 30fps.
+​Use the timecode JSON from Step 2 to sequence the video clips on the timeline so they perfectly match the voiceover length.
+​For each video clip, create a specific "sandwich" layout using React/CSS:
+​Background Layer: Duplicate the video clip. Set transform: scale(3.3) (330%) to fill the vertical frame, and apply filter: blur(20px) for a blurred background effect.
+​Foreground Layer: Place the same video clip on top. Set transform: scale(1.5) or 1.6 (150-160%) and center it, so the main action is clearly visible.
+​Add mixed_audio.wav as the audio track for the composition.
+​STEP 5: Dynamic UI & Subtitles (Remotion)
+​Build a custom CapCut-style animated subtitle component.
+​Feed the Whisper word-level JSON into this component. As the audio plays, the currently spoken word should be highlighted (e.g., scale up slightly, change color to yellow/green).
+​Add logo.png fixed in the top right corner of the composition.
+​STEP 6: Dual Export System
+​Write the programmatic rendering logic (using @remotion/bundler and @remotion/renderer) to automatically output TWO separate video files:
+​[filename]_clear.mp4: The fully edited video with the blurred background layout and mixed audio, but STRICTLY WITHOUT the subtitle component and WITHOUT the logo.
+​[filename]_caption.mp4: The exact same video, but WITH the animated subtitles and the logo included.
+​INSTRUCTIONS FOR THE AGENT:
+Start by providing the system architecture and the file structure. Then, write the code step-by-step, starting with the FFmpeg audio mixing script and the Remotion composition setup. Ensure the Remotion components accurately reflect the 330% blurred background and 150% foreground layout. Do not use generic placeholders for the core logic
