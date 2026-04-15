@@ -1,6 +1,5 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-export const OPENROUTER_MODEL_SCRIPT = "google/gemini-3-pro-preview";
 export const OPENROUTER_MODEL_TOP_FRAMES = "google/gemini-3.1-flash-lite-preview";
 export const OPENROUTER_MODEL_TRANSCRIPT = "google/gemini-3-pro-preview";
 
