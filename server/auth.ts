@@ -136,7 +136,7 @@ async function createAdminUser(
   }
 
   console.log(`\n🔑 Admin account created for ${email}`);
-  console.log(`   Username: admin / Password: admin (change this!)\n`);
+  console.log(`   Username: admin / Password: [REDACTED] (change this!)\n`);
 
   return { ...newUser, permissions: [...ALL_FEATURES] };
 }
@@ -411,7 +411,7 @@ export async function ensureAdminExists() {
     console.log(`\n${"=".repeat(50)}`);
     console.log(`🔑 DEFAULT ADMIN ACCOUNT CREATED`);
     console.log(`   Username: admin`);
-    console.log(`   Password: admin`);
+    console.log(`   Password: [REDACTED]`);
     console.log(`   Email: ${ADMIN_EMAILS[0] || "not set"}`);
     console.log(`   ⚠️  CHANGE THE PASSWORD AFTER FIRST LOGIN!`);
     console.log(`${"=".repeat(50)}\n`);
