@@ -65,7 +65,8 @@ export default function MotionTrack() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight text-foreground">AI Motion Tracking</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Automatically track a moving subject and attach floating text or emojis dynamically.
+          MediaPipe locks onto the face in the first frames, then OpenCV's CSRT tracker follows that target
+          for the rest of the clip — your text or emoji floats just above the tracked subject.
         </p>
       </div>
 

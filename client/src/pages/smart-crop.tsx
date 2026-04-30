@@ -63,7 +63,8 @@ export default function SmartCrop() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight text-foreground">AI Smart Crop</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Automatically crop 16:9 videos into dynamic 9:16 vertical shorts.
+          MediaPipe finds the dominant face in your video and follows it as the crop window moves through the
+          frame, then exports a smooth 1080×1920 vertical short. Falls back to a center crop when no face is detected.
         </p>
       </div>
 

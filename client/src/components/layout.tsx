@@ -39,12 +39,12 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/elevenlabs", label: "ElevenLabs Voiceover", icon: Mic2, description: "Generate voiceovers from text", feature: "elevenlabs" },
   { href: "/download", label: "Download Video", icon: Download, description: "Fetch videos by URL (yt-dlp)", feature: "download" },
   { href: "/voiceover-script", label: "Viral Voiceover Script", icon: Sparkles, description: "AI script from short video (Gemini 3 Pro)", feature: "voiceover-script" },
-  { href: "/smart-crop", label: "AI Smart Crop", icon: Scissors, description: "Auto face-tracking & cropping", feature: "smart-crop" },
-  { href: "/auto-ducking", label: "Auto-Ducking", icon: Mic2, description: "Smart background music mixing", feature: "auto-ducking" },
-  { href: "/highlights", label: "Podcast Highlights", icon: Wand2, description: "Batch extraction from long videos", feature: "highlights" },
-  { href: "/color-grade", label: "AI Color Grade", icon: Palette, description: "Cinematic color correction", feature: "color-grade" },
-  { href: "/vocal-isolate", label: "Vocal Isolator", icon: AudioLines, description: "Studio quality audio cleaning", feature: "vocal-isolate" },
-  { href: "/motion-track", label: "Motion Track", icon: Film, description: "Dynamic object tracking", feature: "motion-track" },
+  { href: "/smart-crop", label: "AI Smart Crop", icon: Scissors, description: "MediaPipe face-tracked 9:16 reframe", feature: "smart-crop" },
+  { href: "/auto-ducking", label: "Auto-Ducking", icon: Mic2, description: "Sidechain compression for clean voice", feature: "auto-ducking" },
+  { href: "/highlights", label: "Podcast Highlights", icon: Wand2, description: "Gemini picks the best moments", feature: "highlights" },
+  { href: "/color-grade", label: "Cinematic Color Grade", icon: Palette, description: "6 selectable cinematic presets", feature: "color-grade" },
+  { href: "/vocal-isolate", label: "Vocal Isolator", icon: AudioLines, description: "Demucs source separation (CPU)", feature: "vocal-isolate" },
+  { href: "/motion-track", label: "Motion Track", icon: Film, description: "OpenCV CSRT object tracker", feature: "motion-track" },
 ];
 
 const COMBO_ITEMS: NavItem[] = [

@@ -468,16 +468,19 @@ async function processViralCombo(project: any, projectDir: string) {
       await concatVideoSegments(segmentPaths, highlightVideo);
     });
 
+    // Real duration of the highlights so smart-crop and sandwich aren't trimmed to a fixed 15s.
+    const highlightDuration = await getMediaDuration(highlightVideo);
+
     await updateProject(project.id, "video_composition", 50);
     const croppedVideo = path.join(projectDir, `cropped.mp4`);
     await safeExecuteStep(project.id, "smart_crop", async () => {
-      await smartCropVideo(highlightVideo, croppedVideo, 15);
+      await smartCropVideo(highlightVideo, croppedVideo, 0); // 0 = keep full duration
     });
 
     await updateProject(project.id, "subtitle_overlay", 70);
     const coloredVideo = path.join(projectDir, `colored.mp4`);
     await safeExecuteStep(project.id, "color_grade", async () => {
-      await autoColorGrade(croppedVideo, coloredVideo);
+      await autoColorGrade(croppedVideo, coloredVideo, "punchy_vibrant");
     });
 
     await updateProject(project.id, "exporting", 90);
@@ -491,7 +494,7 @@ async function processViralCombo(project: any, projectDir: string) {
     const finalVideo = path.join(projectDir, `final_viral.mp4`);
 
     await safeExecuteStep(project.id, "create_sandwich", async () => {
-      await createSandwichVideo([coloredVideo], coloredVideo, null, clearVideo, finalVideo, subtitlePath, 15, project.isVerticalSource, project.cropType);
+      await createSandwichVideo([coloredVideo], coloredVideo, null, clearVideo, finalVideo, subtitlePath, highlightDuration, project.isVerticalSource, project.cropType);
     });
 
     tempFiles.push(highlightVideo);
@@ -532,13 +535,14 @@ async function processActionCombo(project: any, projectDir: string) {
     await updateProject(project.id, "video_composition", 20);
     const croppedVideo = path.join(projectDir, `cropped.mp4`);
     await safeExecuteStep(project.id, "smart_crop", async () => {
-      await smartCropVideo(project.sourceVideoPath!, croppedVideo, 10);
+      // Keep full source duration — no more 10-second hardcoded trim.
+      await smartCropVideo(project.sourceVideoPath!, croppedVideo, 0);
     });
 
     await updateProject(project.id, "subtitle_overlay", 50);
     const coloredVideo = path.join(projectDir, `colored.mp4`);
     await safeExecuteStep(project.id, "color_grade", async () => {
-      await autoColorGrade(croppedVideo, coloredVideo);
+      await autoColorGrade(croppedVideo, coloredVideo, "teal_orange");
     });
 
     await updateProject(project.id, "exporting", 80);
@@ -577,12 +581,14 @@ async function processCinematicCombo(project: any, projectDir: string) {
   const coloredSegments = [];
   for (let i=0; i<segmentPaths.length; i++) {
      const p = path.join(projectDir, `colored_seg_${i}.mp4`);
-     await autoColorGrade(segmentPaths[i], p);
+     await autoColorGrade(segmentPaths[i], p, "cinematic_warm");
      coloredSegments.push(p);
   }
 
   await updateProject(project.id, "exporting", 85);
-  const assContent = generateASS(transcription.words, "neon_pop");
+  // Respect the user's caption style instead of forcing "neon_pop".
+  const captionStyleId = project.captionStyle || "capcut_green";
+  const assContent = generateASS(transcription.words, captionStyleId);
   const subtitlePath = path.join(projectDir, "subtitles.ass");
   fs.writeFileSync(subtitlePath, assContent);
 
@@ -656,13 +662,15 @@ async function processColorPipeline(project: any, projectDir: string) {
   const safeName = project.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50);
   const clearVideoPath = path.join(projectDir, `${safeName}_colored.mp4`);
 
+  // captionStyle is hijacked to carry the user's chosen color preset id.
+  const presetId = project.captionStyle || null;
   await safeExecuteStep(project.id, "color_grading", async () => {
-    await autoColorGrade(project.sourceVideoPath!, clearVideoPath);
+    await autoColorGrade(project.sourceVideoPath!, clearVideoPath, presetId);
   });
 
   await updateProject(project.id, "complete", 100, {
     clearVideoPath,
-    captionVideoPath: clearVideoPath
+    captionVideoPath: clearVideoPath,
   });
 }
 
@@ -673,14 +681,14 @@ async function processIsolatePipeline(project: any, projectDir: string) {
   const isVideo = VIDEO_SOURCE_EXTENSIONS.has(
     path.extname(project.sourceVideoPath ?? "").toLowerCase()
   );
-  // Use .m4a since we encode audio as aac
   const ext = isVideo ? ".mp4" : ".m4a";
-  const clearVideoPath = path.join(projectDir, `${safeName}_clean${ext}`);
+  const mode = project.captionStyle === "instrumental" ? "instrumental" : "vocals";
+  const clearVideoPath = path.join(projectDir, `${safeName}_${mode}${ext}`);
 
-  await isolateVocal(project.sourceVideoPath!, clearVideoPath, isVideo);
+  await isolateVocal(project.sourceVideoPath!, clearVideoPath, isVideo, mode);
 
   await updateProject(project.id, "complete", 100, {
     clearVideoPath,
-    captionVideoPath: clearVideoPath
+    captionVideoPath: clearVideoPath,
   });
 }

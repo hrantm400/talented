@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { AudioLines, Mic, Loader2, Play } from "lucide-react";
+import { Mic, Loader2, Play } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -18,11 +18,13 @@ export default function VocalIsolator() {
   const queryClient = useQueryClient();
   const [projectName, setProjectName] = useState("");
   const [sourceMedia, setSourceMedia] = useState<File | null>(null);
+  const [mode, setMode] = useState<"vocals" | "instrumental">("vocals");
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
       const formData = new FormData();
       formData.append("sourceMedia", sourceMedia!);
+      formData.append("mode", mode);
       if (projectName) formData.append("name", projectName);
 
       const res = await fetch("/api/projects/isolate", {
@@ -37,7 +39,10 @@ export default function VocalIsolator() {
       queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
       setSourceMedia(null);
       setProjectName("");
-      toast({ title: "Pipeline started", description: "Vocal isolation processing in background" });
+      toast({
+        title: "Pipeline started",
+        description: "Demucs source separation runs on CPU — expect ~5–10× the source duration.",
+      });
     },
     onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
@@ -63,7 +68,8 @@ export default function VocalIsolator() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight text-foreground">Vocal Isolator</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Remove background noise, wind, and echo. Export studio-quality audio with broadcast normalization.
+          Real source separation with Demucs (htdemucs). Splits any track into a clean vocal stem and an
+          instrumental stem. CPU-only here — processing takes about 5–10× the source duration.
         </p>
       </div>
 
@@ -80,20 +86,50 @@ export default function VocalIsolator() {
               />
             </div>
 
+            <div>
+              <label className="text-sm font-medium mb-2 block">Output Stem</label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl">
+                <button
+                  type="button"
+                  onClick={() => setMode("vocals")}
+                  className={`text-left rounded-lg border p-3 transition-all ${
+                    mode === "vocals"
+                      ? "border-primary bg-primary/5 shadow-sm"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <div className="font-medium text-sm">🎤 Vocals only</div>
+                  <div className="text-xs text-muted-foreground mt-1">Acapella — voice with the music removed.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("instrumental")}
+                  className={`text-left rounded-lg border p-3 transition-all ${
+                    mode === "instrumental"
+                      ? "border-primary bg-primary/5 shadow-sm"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <div className="font-medium text-sm">🎹 Instrumental</div>
+                  <div className="text-xs text-muted-foreground mt-1">Karaoke — music with the vocals removed.</div>
+                </button>
+              </div>
+            </div>
+
             <div className="border-2 border-dashed rounded-xl p-6 flex flex-col items-center max-w-md">
               <div className="flex gap-2 mb-3 text-muted-foreground">
                 <Mic className="w-8 h-8" />
               </div>
               <span className="text-sm font-medium mb-2">Video or Audio Source</span>
-              <p className="text-[10px] text-muted-foreground text-center mb-4 max-w-[200px]">
-                Upload an MP4 video or an MP3/WAV file. Noise reduction will be applied automatically.
+              <p className="text-[10px] text-muted-foreground text-center mb-4 max-w-[220px]">
+                Upload an MP4 video or an MP3/WAV file. Demucs separates voice from music.
               </p>
               <input type="file" accept="video/*,audio/*" onChange={e => setSourceMedia(e.target.files?.[0] || null)} className="text-xs" />
             </div>
 
             <Button onClick={() => uploadMutation.mutate()} disabled={!canSubmit} className="w-full sm:w-auto">
               {uploadMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
-              Clean Audio
+              Run Source Separation
             </Button>
           </div>
         </Card>

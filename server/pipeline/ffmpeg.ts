@@ -4,8 +4,46 @@ import path from "path";
 import fs from "fs";
 import type { CaptionStyle } from "../../shared/caption-styles";
 import { getCaptionStyleById } from "../../shared/caption-styles";
+import { getColorPreset } from "../../shared/color-presets";
 
 const execFileAsync = promisify(execFile);
+
+// Resolve the project's Python interpreter (venv first, system fallback).
+const PYTHON_BIN = (() => {
+  const venvPython = path.join(process.cwd(), "venv", "bin", "python");
+  if (fs.existsSync(venvPython)) return venvPython;
+  return "python3";
+})();
+
+const PIPELINE_DIR = path.join(process.cwd(), "server", "pipeline");
+
+async function runPython(
+  script: string,
+  args: string[],
+  timeoutMs: number
+): Promise<any> {
+  const scriptPath = path.join(PIPELINE_DIR, script);
+  const { stdout, stderr } = await execFileAsync(
+    PYTHON_BIN,
+    [scriptPath, ...args],
+    { timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024 }
+  );
+  // Python scripts emit JSON on the last non-empty line of stdout.
+  const lines = stdout.trim().split("\n").filter((l) => l.trim().length > 0);
+  const lastLine = lines[lines.length - 1] || "{}";
+  let parsed: any;
+  try {
+    parsed = JSON.parse(lastLine);
+  } catch (err) {
+    throw new Error(
+      `Python ${script} did not return JSON. stderr=${stderr.slice(-1000)} stdout-tail=${lastLine.slice(0, 500)}`
+    );
+  }
+  if (parsed && parsed.error) {
+    throw new Error(`Python ${script} failed: ${parsed.error}`);
+  }
+  return parsed;
+}
 const DRAW_TEXT_FONT_CANDIDATES = [
   path.join(process.env.WINDIR || "C:/Windows", "Fonts", "arialbd.ttf"),
   path.join(process.env.WINDIR || "C:/Windows", "Fonts", "arial.ttf"),
@@ -121,92 +159,197 @@ export async function autoDucking(
 
 export async function autoColorGrade(
   sourceVideoPath: string,
-  outputPath: string
-): Promise<void> {
+  outputPath: string,
+  presetId: string | null = null
+): Promise<{ presetId: string; presetLabel: string }> {
+  const preset = getColorPreset(presetId);
   const args = [
     "-y",
     "-i", sourceVideoPath,
-    "-vf", "eq=contrast=1.15:brightness=0.02:saturation=1.3:gamma=0.95,unsharp=5:5:1.0:5:5:0.0,curves=m='0/0 0.5/0.4 1/1'",
+    "-vf", preset.filter,
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "20",
     "-c:a", "copy",
-    outputPath
+    outputPath,
   ];
 
   await execFileAsync("ffmpeg", args, { timeout: 300000 });
+  return { presetId: preset.id, presetLabel: preset.label };
 }
 
+/**
+ * Real motion-tracked overlay. Detects the dominant face in the first second of
+ * the source with MediaPipe, then runs an OpenCV CSRT tracker through the rest
+ * of the clip and rasterises the overlay text following that bounding box.
+ *
+ * The Python step writes an mp4v intermediate; we re-encode with libx264 here
+ * so the result matches the rest of the pipeline (faststart, CRF, AAC audio).
+ */
 export async function motionTrackOverlay(
   sourceVideoPath: string,
   outputPath: string,
-  overlayText: string
-): Promise<void> {
-  const escapedText = escapeFilterText(overlayText);
+  overlayText: string,
+  initialBbox: string = "auto"
+): Promise<{ trackedFrames: number; totalFrames: number; tracking: string }> {
+  const tmpPath = outputPath.replace(/\.mp4$/i, "") + "_track_raw.mp4";
+  const result = await runPython(
+    "motion-track.py",
+    [sourceVideoPath, tmpPath, overlayText, initialBbox],
+    900000
+  );
 
-  const drawtextFilter = [
-    `drawtext=${resolveDrawtextFontOption()}`,
-    `text='${escapedText}'`,
-    `fontcolor=white`,
-    `fontsize=64`,
-    `box=1`,
-    `boxcolor=black@0.5`,
-    `boxborderw=10`,
-    `x=(w-text_w)/2+((w-text_w)/3)*sin(t*2)`,
-    `y=(h-text_h)/2+((h-text_h)/3)*cos(t*1.5)`
-  ].join(':');
-
-  const args = [
+  // Re-mux: bring back source audio (mp4v writer drops it) and re-encode video to libx264.
+  const finalArgs = [
     "-y",
+    "-i", tmpPath,
     "-i", sourceVideoPath,
-    "-vf", drawtextFilter,
+    "-map", "0:v:0",
+    "-map", "1:a:0?",
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "20",
-    "-c:a", "copy",
-    outputPath
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-shortest",
+    "-movflags", "+faststart",
+    outputPath,
   ];
+  await execFileAsync("ffmpeg", finalArgs, { timeout: 600000 });
+  if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
 
-  await execFileAsync("ffmpeg", args, { timeout: 300000 });
+  return {
+    trackedFrames: result.tracked_frames || 0,
+    totalFrames: result.frames || 0,
+    tracking: result.tracking_method || "unknown",
+  };
 }
 
+/**
+ * Real vocal source separation with Demucs (htdemucs model, CPU).
+ *
+ * Steps:
+ *  1. If input is video, extract its audio to WAV (Demucs needs an audio file).
+ *  2. Run Demucs in two-stem mode to produce vocals.wav + no_vocals.wav.
+ *  3. Encode the requested stem into the final output. For video sources we
+ *     mux the chosen stem back over the original video stream.
+ *
+ * mode="vocals" → keep only the human voice (instrumental removed).
+ * mode="instrumental" → keep only the music/background (voice removed).
+ */
 export async function isolateVocal(
   sourcePath: string,
   outputPath: string,
-  isVideo: boolean
-): Promise<void> {
-  const args = [
-    "-y",
-    "-i", sourcePath,
-    "-af", "highpass=f=80,lowpass=f=12000,afftdn=nf=-25,loudnorm=I=-16:LRA=11:TP=-1.5"
-  ];
+  isVideo: boolean,
+  mode: "vocals" | "instrumental" = "vocals"
+): Promise<{ duration: number; model: string }> {
+  const workDir = path.dirname(outputPath);
+  const stemsDir = path.join(workDir, `stems_${Date.now()}`);
+  fs.mkdirSync(stemsDir, { recursive: true });
 
+  let demucsInput = sourcePath;
+  let extractedWav: string | null = null;
   if (isVideo) {
-    args.push("-c:v", "copy");
+    extractedWav = path.join(stemsDir, "source.wav");
+    await execFileAsync(
+      "ffmpeg",
+      ["-y", "-i", sourcePath, "-vn", "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", extractedWav],
+      { timeout: 300000 }
+    );
+    demucsInput = extractedWav;
   }
 
-  args.push("-c:a", "aac", "-b:a", "192k", outputPath);
+  const result = await runPython(
+    "vocal-isolate.py",
+    [demucsInput, stemsDir],
+    1800000 // 30 min hard cap — demucs CPU is slow but bounded
+  );
 
-  await execFileAsync("ffmpeg", args, { timeout: 300000 });
+  const chosen = mode === "instrumental" ? result.no_vocals : result.vocals;
+  if (!chosen || !fs.existsSync(chosen)) {
+    throw new Error(`Demucs stem missing for mode=${mode}`);
+  }
+
+  // Encode/mux to final output
+  if (isVideo) {
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-i", sourcePath,
+        "-i", chosen,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        outputPath,
+      ],
+      { timeout: 300000 }
+    );
+  } else {
+    await execFileAsync(
+      "ffmpeg",
+      ["-y", "-i", chosen, "-c:a", "aac", "-b:a", "192k", outputPath],
+      { timeout: 300000 }
+    );
+  }
+
+  // Cleanup intermediate stems
+  try {
+    fs.rmSync(stemsDir, { recursive: true, force: true });
+  } catch {}
+
+  return { duration: result.duration || 0, model: result.model || "htdemucs" };
 }
 
+/**
+ * Real face-tracking smart crop. A Python pass uses MediaPipe to compute the
+ * dominant face's center-x trajectory and writes a 9:16 mp4v intermediate.
+ * We then re-encode with libx264 here and bring the source audio back.
+ *
+ * If `duration` is finite, the final output is trimmed to that length;
+ * passing 0 keeps the full source.
+ */
 export async function smartCropVideo(
   sourceVideoPath: string,
   outputPath: string,
   duration: number
-): Promise<void> {
+): Promise<{ tracked: boolean; facesFound: number; frames: number }> {
+  const tmpPath = outputPath.replace(/\.mp4$/i, "") + "_crop_raw.mp4";
+  const result = await runPython(
+    "smart-crop.py",
+    [sourceVideoPath, tmpPath, "1920", "1080"],
+    900000
+  );
+
   const args = [
     "-y",
+    "-i", tmpPath,
     "-i", sourceVideoPath,
-    "-vf", "crop=ih*9/16:ih:iw/2-ih*9/32:0,scale=1080:1920",
+    "-map", "0:v:0",
+    "-map", "1:a:0?",
     "-c:v", "libx264",
-    "-crf", "23",
-    "-c:a", "copy",
-    "-t", duration.toString(),
-    outputPath
+    "-preset", "veryfast",
+    "-crf", "20",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-shortest",
+    "-movflags", "+faststart",
   ];
+  if (Number.isFinite(duration) && duration > 0) {
+    args.push("-t", duration.toString());
+  }
+  args.push(outputPath);
+  await execFileAsync("ffmpeg", args, { timeout: 600000 });
+  if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
 
-  await execFileAsync("ffmpeg", args, { timeout: 300000 });
+  return {
+    tracked: !!result.tracked,
+    facesFound: result.faces_found || 0,
+    frames: result.frames || 0,
+  };
 }
 
 export async function extractVideoSegments(

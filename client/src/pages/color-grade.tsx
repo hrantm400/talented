@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Palette, Video, Loader2, Play } from "lucide-react";
+import { Video, Loader2, Play } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { PROJECT_TYPES, type Project } from "@shared/schema";
+import { COLOR_PRESETS } from "@shared/color-presets";
 import { ProjectCard } from "@/components/ProjectCard";
 import { AnimatePresence } from "framer-motion";
 
@@ -18,11 +19,13 @@ export default function ColorGrade() {
   const queryClient = useQueryClient();
   const [projectName, setProjectName] = useState("");
   const [sourceVideo, setSourceVideo] = useState<File | null>(null);
+  const [preset, setPreset] = useState(COLOR_PRESETS[0].id);
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
       const formData = new FormData();
       formData.append("sourceVideo", sourceVideo!);
+      formData.append("preset", preset);
       if (projectName) formData.append("name", projectName);
 
       const res = await fetch("/api/projects/color", {
@@ -61,9 +64,10 @@ export default function ColorGrade() {
   return (
     <div className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">AI Color Grading</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Cinematic Color Grade</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Automatically balance exposure and apply a professional cinematic color grade to your raw videos.
+          Apply one of six professional FFmpeg color-grade presets — teal & orange, warm sunset, cool night,
+          punchy social, vintage film, or B&W cinematic.
         </p>
       </div>
 
@@ -78,6 +82,27 @@ export default function ColorGrade() {
                 placeholder="Cinematic Output"
                 className="max-w-md"
               />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-2 block">Preset</label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {COLOR_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setPreset(p.id)}
+                    className={`text-left rounded-lg border p-3 transition-all ${
+                      preset === p.id
+                        ? "border-primary bg-primary/5 shadow-sm"
+                        : "border-border hover:border-primary/50"
+                    }`}
+                  >
+                    <div className="font-medium text-sm">{p.label}</div>
+                    <div className="text-xs text-muted-foreground mt-1">{p.description}</div>
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="border-2 border-dashed rounded-xl p-6 flex flex-col items-center max-w-md">

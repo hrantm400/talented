@@ -790,6 +790,9 @@ export async function registerRoutes(
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         if (!files.sourceVideo?.[0]) return res.status(400).json({ error: "Source video required" });
 
+        // captionStyle column is reused to carry the chosen color preset id.
+        const presetId = (req.body.preset as string) || "teal_orange";
+
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Cinematic Color Grade",
@@ -798,6 +801,7 @@ export async function registerRoutes(
           currentStep: "uploading",
           progress: 5,
           sourceVideoPath: files.sourceVideo[0].path,
+          captionStyle: presetId,
         });
 
         const { queuePipeline } = await import("./pipeline/processor");
@@ -850,6 +854,9 @@ export async function registerRoutes(
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         if (!files.sourceMedia?.[0]) return res.status(400).json({ error: "Source media required" });
 
+        // captionStyle column reused to carry the chosen stem ("vocals" | "instrumental").
+        const mode = req.body.mode === "instrumental" ? "instrumental" : "vocals";
+
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Studio Clear Vocal",
@@ -858,6 +865,7 @@ export async function registerRoutes(
           currentStep: "uploading",
           progress: 5,
           sourceVideoPath: files.sourceMedia[0].path, // Store both audio/video in the same path column
+          captionStyle: mode,
         });
 
         const { queuePipeline } = await import("./pipeline/processor");
