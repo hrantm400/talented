@@ -9,7 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { Project } from "@shared/schema";
+import { PROJECT_TYPES, type Project } from "@shared/schema";
 import { ProjectCard } from "@/components/ProjectCard";
 import { AnimatePresence } from "framer-motion";
 
@@ -27,12 +27,13 @@ export default function CinematicCombo() {
       formData.append("sourceVideo", sourceVideo!);
       formData.append("voiceover", voiceover!);
       formData.append("bgMusic", bgMusic!);
-      formData.append("comboType", "combo-cinematic");
+      formData.append("comboType", PROJECT_TYPES.COMBO_CINEMATIC);
       if (projectName) formData.append("name", projectName);
 
       const res = await fetch("/api/projects/combo", {
         method: "POST",
         body: formData,
+        credentials: "include",
       });
       if (!res.ok) throw new Error((await res.json()).error);
       return res.json();
@@ -51,7 +52,7 @@ export default function CinematicCombo() {
   const { data: allProjects = [] } = useQuery<Project[]>({
     queryKey: ["/api/projects"],
   });
-  const projects = allProjects.filter(p => p.projectType === "combo-cinematic");
+  const projects = allProjects.filter(p => p.projectType === PROJECT_TYPES.COMBO_CINEMATIC);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {

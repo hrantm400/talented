@@ -1,4 +1,4 @@
-import { type Project, type InsertProject } from "@shared/schema";
+import { type Project, type InsertProject, PROJECT_TYPES } from "@shared/schema";
 
 export interface IStorage {
   createProject(project: InsertProject): Promise<Project>;
@@ -18,7 +18,7 @@ export class DatabaseStorage implements IStorage {
     const [newProject] = await db.insert(projects).values({
       userId: project.userId || null,
       name: project.name || "Untitled Project",
-      projectType: project.projectType || "classic",
+      projectType: project.projectType || PROJECT_TYPES.CLASSIC,
       status: project.status || "uploading",
       currentStep: project.currentStep || "uploading",
       progress: project.progress || 0,

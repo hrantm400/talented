@@ -8,7 +8,6 @@ import {
   Scissors,
   Mic2,
   Wand2,
-  Type,
   Settings,
   Sparkles,
   Palette,
@@ -46,7 +45,6 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/color-grade", label: "AI Color Grade", icon: Palette, description: "Cinematic color correction", feature: "color-grade" },
   { href: "/vocal-isolate", label: "Vocal Isolator", icon: AudioLines, description: "Studio quality audio cleaning", feature: "vocal-isolate" },
   { href: "/motion-track", label: "Motion Track", icon: Film, description: "Dynamic object tracking", feature: "motion-track" },
-  { href: "/style-studio", label: "Style Studio", icon: Type, description: "Custom subtitle fonts & colors", feature: "style-studio" },
 ];
 
 const COMBO_ITEMS: NavItem[] = [

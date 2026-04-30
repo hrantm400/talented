@@ -38,7 +38,7 @@ export function ModelSelector({ value, onChange, label, description, requireVisi
   const { data: routeData, isLoading, error } = useQuery({
     queryKey: ["/api/openrouter/models"],
     queryFn: async () => {
-      const res = await fetch("/api/openrouter/models");
+      const res = await fetch("/api/openrouter/models", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch models");
       return res.json();
     },

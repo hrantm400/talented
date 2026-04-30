@@ -2,7 +2,6 @@ import { sql } from "drizzle-orm";
 import {
   pgTable,
   text,
-  varchar,
   serial,
   integer,
   timestamp,
@@ -150,11 +149,37 @@ export const ALL_FEATURES = [
   "color-grade",
   "vocal-isolate",
   "motion-track",
-  "style-studio",
   "combos",
 ] as const;
 
 export type FeatureKey = (typeof ALL_FEATURES)[number];
+
+// ─── Project types ───
+export const PROJECT_TYPES = {
+  CLASSIC: "classic",
+  AUTOMATED: "automated",
+  DUCKING: "ducking",
+  CROP: "crop",
+  COLOR: "color",
+  ISOLATE: "isolate",
+  HIGHLIGHTS: "highlights",
+  MOTION_TRACK: "motion-track",
+  COMBO_VIRAL: "combo-viral",
+  COMBO_PODCAST: "combo-podcast",
+  COMBO_ACTION: "combo-action",
+  COMBO_CINEMATIC: "combo-cinematic",
+  COMBO_MEME: "combo-meme",
+} as const;
+
+export type ProjectType = (typeof PROJECT_TYPES)[keyof typeof PROJECT_TYPES];
+
+export const COMBO_TYPES: ProjectType[] = [
+  PROJECT_TYPES.COMBO_VIRAL,
+  PROJECT_TYPES.COMBO_PODCAST,
+  PROJECT_TYPES.COMBO_ACTION,
+  PROJECT_TYPES.COMBO_CINEMATIC,
+  PROJECT_TYPES.COMBO_MEME,
+];
 
 // ─── Projects (with userId) ───
 export const projects = pgTable("projects", {

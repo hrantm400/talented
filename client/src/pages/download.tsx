@@ -35,6 +35,7 @@ export default function DownloadPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
+        credentials: "include",
       });
       if (!res.ok) {
         const msg = await res.text();
@@ -72,6 +73,7 @@ export default function DownloadPage() {
           formatId: selectedFormatId,
           isVideoOnly: selected?.isVideoOnly ?? false,
         }),
+        credentials: "include",
       });
       if (!res.ok) {
         const msg = await res.text();

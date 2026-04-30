@@ -14,6 +14,7 @@ import path from "path";
 import fs from "fs";
 import { broadcastProjectUpdate } from "../websocket";
 import { appendVideoRow } from "../google-sheets/append";
+import { PROJECT_TYPES } from "@shared/schema";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
@@ -63,7 +64,7 @@ async function updateProject(
       }).catch(() => {});
     }
 
-    if (step === "complete" && updatedProject.projectType === "automated") {
+    if (step === "complete" && updatedProject.projectType === PROJECT_TYPES.AUTOMATED) {
       const baseUrl = process.env.APP_PUBLIC_URL || process.env.BASE_URL || "";
       if (baseUrl) {
         if (updatedProject.userId) {
@@ -126,51 +127,40 @@ export async function runPipeline(projectId: number): Promise<void> {
   }
 
   try {
-    if (project.projectType === "ducking") {
-      await processDuckingPipeline(project, projectDir);
-      return;
-    }
-    if (project.projectType === "crop") {
-      await processCropPipeline(project, projectDir);
-      return;
-    }
-    if (project.projectType === "highlights") {
-      await processHighlightsPipeline(project, projectDir);
-      return;
-    }
-    if (project.projectType === "color") {
-      await processColorPipeline(project, projectDir);
-      return;
-    }
-    if (project.projectType === "isolate") {
-      await processIsolatePipeline(project, projectDir);
-      return;
-    }
-    if (project.projectType === "motion-track") {
-      await processMotionTrackPipeline(project, projectDir);
-      return;
-    }
-
-    // Combo Pipelines
-    if (project.projectType === "combo-viral") {
-      await processViralCombo(project, projectDir);
-      return;
-    }
-    if (project.projectType === "combo-podcast") {
-      await processPodcastCombo(project, projectDir);
-      return;
-    }
-    if (project.projectType === "combo-action") {
-      await processActionCombo(project, projectDir);
-      return;
-    }
-    if (project.projectType === "combo-cinematic") {
-      await processCinematicCombo(project, projectDir);
-      return;
-    }
-    if (project.projectType === "combo-meme") {
-      await processMemeCombo(project, projectDir);
-      return;
+    switch (project.projectType) {
+      case PROJECT_TYPES.DUCKING:
+        await processDuckingPipeline(project, projectDir);
+        return;
+      case PROJECT_TYPES.CROP:
+        await processCropPipeline(project, projectDir);
+        return;
+      case PROJECT_TYPES.HIGHLIGHTS:
+        await processHighlightsPipeline(project, projectDir);
+        return;
+      case PROJECT_TYPES.COLOR:
+        await processColorPipeline(project, projectDir);
+        return;
+      case PROJECT_TYPES.ISOLATE:
+        await processIsolatePipeline(project, projectDir);
+        return;
+      case PROJECT_TYPES.MOTION_TRACK:
+        await processMotionTrackPipeline(project, projectDir);
+        return;
+      case PROJECT_TYPES.COMBO_VIRAL:
+        await processViralCombo(project, projectDir);
+        return;
+      case PROJECT_TYPES.COMBO_PODCAST:
+        await processPodcastCombo(project, projectDir);
+        return;
+      case PROJECT_TYPES.COMBO_ACTION:
+        await processActionCombo(project, projectDir);
+        return;
+      case PROJECT_TYPES.COMBO_CINEMATIC:
+        await processCinematicCombo(project, projectDir);
+        return;
+      case PROJECT_TYPES.COMBO_MEME:
+        await processMemeCombo(project, projectDir);
+        return;
     }
 
     // Classic Sandwich Pipeline

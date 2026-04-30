@@ -9,7 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { Project } from "@shared/schema";
+import { PROJECT_TYPES, type Project } from "@shared/schema";
 import { ProjectCard } from "@/components/ProjectCard";
 import { AnimatePresence } from "framer-motion";
 
@@ -28,6 +28,7 @@ export default function ColorGrade() {
       const res = await fetch("/api/projects/color", {
         method: "POST",
         body: formData,
+        credentials: "include",
       });
       if (!res.ok) throw new Error((await res.json()).error);
       return res.json();
@@ -44,7 +45,7 @@ export default function ColorGrade() {
   const { data: allProjects = [] } = useQuery<Project[]>({
     queryKey: ["/api/projects"],
   });
-  const projects = allProjects.filter(p => p.projectType === "color");
+  const projects = allProjects.filter(p => p.projectType === PROJECT_TYPES.COLOR);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {

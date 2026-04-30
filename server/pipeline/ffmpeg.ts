@@ -15,9 +15,21 @@ const DRAW_TEXT_FONT_CANDIDATES = [
   "/Library/Fonts/Arial Bold.ttf",
 ];
 
-function escapeFilterValue(value: string): string {
+// Escape a filesystem path for use inside an FFmpeg filter argument
+// (the path is intended to be wrapped in single quotes by the caller).
+function escapeFilterPath(value: string): string {
   return value
     .replace(/\\/g, "/")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
+}
+
+// Escape arbitrary user text for the drawtext text= option (single-quoted).
+// Backslashes are doubled, then colon and single-quote are escaped because
+// FFmpeg's filter parser treats both as syntax characters.
+function escapeFilterText(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'");
 }
@@ -25,7 +37,7 @@ function escapeFilterValue(value: string): string {
 function resolveDrawtextFontOption(): string {
   const fontPath = DRAW_TEXT_FONT_CANDIDATES.find((candidate) => fs.existsSync(candidate));
   if (fontPath) {
-    return `fontfile='${escapeFilterValue(fontPath)}'`;
+    return `fontfile='${escapeFilterPath(fontPath)}'`;
   }
 
   return "font='Sans'";
@@ -130,11 +142,7 @@ export async function motionTrackOverlay(
   outputPath: string,
   overlayText: string
 ): Promise<void> {
-  // Properly escape the user-provided text for the drawtext filter
-  const escapedText = overlayText
-    .replace(/\\/g, "\\\\") // Escape backslashes
-    .replace(/:/g, "\\:")   // Escape colons
-    .replace(/'/g, "");     // Remove single quotes to prevent injection
+  const escapedText = escapeFilterText(overlayText);
 
   const drawtextFilter = [
     `drawtext=${resolveDrawtextFontOption()}`,
@@ -192,7 +200,6 @@ export async function smartCropVideo(
     "-i", sourceVideoPath,
     "-vf", "crop=ih*9/16:ih:iw/2-ih*9/32:0,scale=1080:1920",
     "-c:v", "libx264",
-    "-crf", "23",
     "-crf", "23",
     "-c:a", "copy",
     "-t", duration.toString(),
@@ -320,7 +327,7 @@ export async function createSandwichVideo(
       ? `[0:v]${initialCrop}scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base]`
       : `[0:v]${initialCrop}split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[blurred];[fg]scale=1920:1080:force_original_aspect_ratio=increase,crop=1080:1080:(iw-1080)/2:(ih-1080)/2,setsar=1[scaled];[blurred][scaled]overlay=0:(H-h)/2[base]`;
 
-    const safeSubPath = subtitlePath ? subtitlePath.replace(/\\/g, "/").replace(/'/g, "\\'").replace(/:/g, "\\:") : null;
+    const safeSubPath = subtitlePath ? escapeFilterPath(subtitlePath) : null;
     let finalFilter = filterComplex;
 
     let hasOverlay = false;

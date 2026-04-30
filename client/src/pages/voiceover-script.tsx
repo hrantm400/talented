@@ -42,6 +42,7 @@ export default function VoiceoverScriptPage() {
       const res = await fetch(url, {
         method: "POST",
         body: formData,
+        credentials: "include",
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

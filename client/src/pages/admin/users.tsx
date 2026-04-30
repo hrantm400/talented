@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { Users as UsersIcon, Plus, Shield, Trash2, Key, ToggleLeft, ToggleRight, Check, X, Clock, Mail, UserPlus, ChevronDown, ChevronUp } from "lucide-react";
+import { ALL_FEATURES as FEATURE_KEYS, type FeatureKey } from "@shared/schema";
 
 type UserRow = {
   id: number;
@@ -25,21 +26,22 @@ type AccessRequestRow = {
   createdAt: string;
 };
 
-const ALL_FEATURES = [
-  { key: "classic", label: "Auto-Shorts (Classic)" },
-  { key: "automated-shorts", label: "Automated Shorts" },
-  { key: "elevenlabs", label: "ElevenLabs" },
-  { key: "download", label: "Download Video" },
-  { key: "voiceover-script", label: "Voiceover Script" },
-  { key: "smart-crop", label: "AI Smart Crop" },
-  { key: "auto-ducking", label: "Auto-Ducking" },
-  { key: "highlights", label: "Highlights" },
-  { key: "color-grade", label: "Color Grade" },
-  { key: "vocal-isolate", label: "Vocal Isolator" },
-  { key: "motion-track", label: "Motion Track" },
-  { key: "style-studio", label: "Style Studio" },
-  { key: "combos", label: "Magic Combos" },
-];
+const FEATURE_LABELS: Record<FeatureKey, string> = {
+  "classic": "Auto-Shorts (Classic)",
+  "automated-shorts": "Automated Shorts",
+  "elevenlabs": "ElevenLabs",
+  "download": "Download Video",
+  "voiceover-script": "Voiceover Script",
+  "smart-crop": "AI Smart Crop",
+  "auto-ducking": "Auto-Ducking",
+  "highlights": "Highlights",
+  "color-grade": "Color Grade",
+  "vocal-isolate": "Vocal Isolator",
+  "motion-track": "Motion Track",
+  "combos": "Magic Combos",
+};
+
+const ALL_FEATURES = FEATURE_KEYS.map((key) => ({ key, label: FEATURE_LABELS[key] }));
 
 export default function AdminUsersPage() {
   const { isAdmin } = useAuth();

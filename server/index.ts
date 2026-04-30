@@ -44,10 +44,9 @@ app.use(loadUser);
 // ──── Auth routes (public — no requireAuth) ────
 app.use(createAuthRouter());
 
-// ──── Protect all /api/* routes (except /api/auth/* and downloads) ────
+// ──── Protect all /api/* routes (except /api/auth/*) ────
 app.use("/api", (req: Request, res: Response, next: NextFunction) => {
   if (req.path.startsWith("/auth/")) return next();
-  if (req.path.match(/^\/projects\/\d+\/download\//)) return next();
   return requireAuth(req, res, next);
 });
 

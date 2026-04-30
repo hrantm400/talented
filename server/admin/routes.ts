@@ -420,26 +420,6 @@ export function createAdminRouter(): Router {
         }
       }
 
-      // Also sync with legacy eleven_labs_settings table just in case any background service uses it
-      if (updates.elevenlabsKeys && updates.elevenlabsKeys.length > 0) {
-        const activeKey = updates.elevenlabsKeys.find((k: any) => k.isActive) || updates.elevenlabsKeys[0];
-        const { upsertElevenLabsSettings } = await import("../elevenlabs/settings");
-        await upsertElevenLabsSettings({
-          apiKey: activeKey.key,
-          plan: activeKey.plan,
-          keyLabel: activeKey.name,
-        });
-      } else if (elevenlabsApiKey !== undefined) {
-        const { upsertElevenLabsSettings } = await import("../elevenlabs/settings");
-        if (elevenlabsApiKey) {
-          await upsertElevenLabsSettings({
-            apiKey: elevenlabsApiKey,
-            plan: (elevenlabsPlan as "free" | "paid") || "free",
-            keyLabel: elevenlabsKeyLabel,
-          });
-        }
-      }
-
       res.json({ status: "ok" });
     } catch (error: any) {
       res.status(500).json({ error: error.message });

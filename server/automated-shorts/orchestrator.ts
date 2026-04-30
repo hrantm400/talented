@@ -8,6 +8,7 @@ import { generateVoiceover } from "../elevenlabs/voiceover";
 import { queuePipeline } from "../pipeline/processor";
 import { findHookMoment } from "../pipeline/gemini";
 import { getMediaDuration } from "../pipeline/ffmpeg";
+import { PROJECT_TYPES } from "@shared/schema";
 
 function getIsVertical(filePath: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -86,7 +87,7 @@ export async function runAutomatedShort(
   const project = await storage.createProject({
     userId: options.userId || null,
     name,
-    projectType: "automated",
+    projectType: PROJECT_TYPES.AUTOMATED,
     status: "processing",
     currentStep: "uploading",
     progress: 5,

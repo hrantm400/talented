@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 
 import { useQuery } from "@tanstack/react-query";
+import { PROJECT_TYPES } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 import type { Project } from "@shared/schema";
 import { ProjectCard } from "@/components/ProjectCard";
@@ -30,6 +31,7 @@ export default function AutoDucking() {
       const res = await fetch("/api/projects/ducking", {
         method: "POST",
         body: formData,
+        credentials: "include",
       });
       if (!res.ok) throw new Error((await res.json()).error);
       return res.json();
@@ -47,7 +49,7 @@ export default function AutoDucking() {
   const { data: allProjects = [] } = useQuery<Project[]>({
     queryKey: ["/api/projects"],
   });
-  const projects = allProjects.filter(p => p.projectType === "ducking");
+  const projects = allProjects.filter(p => p.projectType === PROJECT_TYPES.DUCKING);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {

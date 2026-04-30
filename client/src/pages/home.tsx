@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/select";
 import { motion, AnimatePresence } from "framer-motion";
 import { CaptionStyleSelector } from "@/components/caption-styles";
-import type { Project } from "@shared/schema";
+import { PROJECT_TYPES, type Project } from "@shared/schema";
 import { ProjectCard } from "@/components/ProjectCard";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -159,7 +159,7 @@ export default function Home() {
     mutationFn: async (files: FileList) => {
       const fd = new FormData();
       for (let i = 0; i < files.length; i++) fd.append("files", files[i]);
-      const res = await fetch("/api/assets/bg-music", { method: "POST", body: fd });
+      const res = await fetch("/api/assets/bg-music", { method: "POST", body: fd, credentials: "include" });
       if (!res.ok) throw new Error((await res.json()).error || "Failed");
       return res.json();
     },
@@ -174,7 +174,7 @@ export default function Home() {
     mutationFn: async (files: FileList) => {
       const fd = new FormData();
       for (let i = 0; i < files.length; i++) fd.append("files", files[i]);
-      const res = await fetch("/api/assets/logos", { method: "POST", body: fd });
+      const res = await fetch("/api/assets/logos", { method: "POST", body: fd, credentials: "include" });
       if (!res.ok) throw new Error((await res.json()).error || "Failed");
       return res.json();
     },
@@ -561,7 +561,7 @@ export default function Home() {
                 </Card>
               ))}
             </div>
-          ) : projects.filter(p => p.projectType === "classic").length === 0 ? (
+          ) : projects.filter(p => p.projectType === PROJECT_TYPES.CLASSIC).length === 0 ? (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -580,7 +580,7 @@ export default function Home() {
           ) : (
             <AnimatePresence mode="popLayout">
               <div className="space-y-4">
-                {projects.filter(p => p.projectType === "classic").map((project) => (
+                {projects.filter(p => p.projectType === PROJECT_TYPES.CLASSIC).map((project) => (
                   <ProjectCard
                     key={project.id}
                     project={project}

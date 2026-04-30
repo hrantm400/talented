@@ -40,6 +40,22 @@ declare global {
 
 const PgSession = connectPgSimple(session);
 
+function resolveSessionSecret(): string {
+  const fromEnv = process.env.SESSION_SECRET;
+  if (fromEnv && fromEnv.trim().length >= 16) return fromEnv.trim();
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "SESSION_SECRET must be set (>=16 chars) in production. Refusing to start with a derivable fallback."
+    );
+  }
+
+  console.warn(
+    "[auth] SESSION_SECRET not set — using a per-process random value (dev only). Sessions will be invalidated on restart."
+  );
+  return `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function createSessionMiddleware() {
   return session({
     store: new PgSession({
@@ -47,7 +63,7 @@ export function createSessionMiddleware() {
       tableName: "user_sessions",
       createTableIfMissing: true,
     }),
-    secret: process.env.SESSION_SECRET || "reelforge-secret-change-me-" + Date.now(),
+    secret: resolveSessionSecret(),
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -385,8 +401,14 @@ export async function ensureAdminExists() {
   // Ensure at least one admin with password exists
   const allUsers = await db.select().from(users);
   if (allUsers.length === 0) {
-    // Create a default password-based admin
-    const passwordHash = await bcrypt.hash("admin", 10);
+    const envPassword = process.env.ADMIN_PASSWORD?.trim();
+    if (process.env.NODE_ENV === "production" && (!envPassword || envPassword.length < 8)) {
+      throw new Error(
+        "Cannot bootstrap default admin in production without ADMIN_PASSWORD env var (>=8 chars). Set ADMIN_PASSWORD or create the admin manually."
+      );
+    }
+    const adminPassword = envPassword || "admin";
+    const passwordHash = await bcrypt.hash(adminPassword, 10);
     const [newUser] = await db
       .insert(users)
       .values({
@@ -411,7 +433,11 @@ export async function ensureAdminExists() {
     console.log(`\n${"=".repeat(50)}`);
     console.log(`🔑 DEFAULT ADMIN ACCOUNT CREATED`);
     console.log(`   Username: admin`);
-    console.log(`   Password: admin`);
+    if (envPassword) {
+      console.log(`   Password: <from ADMIN_PASSWORD env>`);
+    } else {
+      console.log(`   Password: admin  (dev fallback — set ADMIN_PASSWORD env)`);
+    }
     console.log(`   Email: ${ADMIN_EMAILS[0] || "not set"}`);
     console.log(`   ⚠️  CHANGE THE PASSWORD AFTER FIRST LOGIN!`);
     console.log(`${"=".repeat(50)}\n`);

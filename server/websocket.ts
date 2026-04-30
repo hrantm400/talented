@@ -15,7 +15,13 @@ export function setupWebSocket(server: Server) {
       clients.delete(ws);
     });
 
-    ws.on("error", console.error);
+    ws.on("error", (err) => {
+      console.error("[ws] client error:", err);
+      clients.delete(ws);
+      try {
+        ws.terminate();
+      } catch {}
+    });
   });
 
   return wss;

@@ -35,7 +35,7 @@ import {
   ClipboardPaste,
   AlertCircle,
 } from "lucide-react";
-import { type Project } from "@shared/schema";
+import { PROJECT_TYPES, type Project } from "@shared/schema";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiRequest } from "@/lib/queryClient";
 import { ProjectCard } from "@/components/ProjectCard";
@@ -198,6 +198,7 @@ export default function AutomatedShortsPage() {
       const res = await fetch("/api/automated-shorts", {
         method: "POST",
         body: formData,
+        credentials: "include",
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -232,7 +233,7 @@ export default function AutomatedShortsPage() {
     mutationFn: async (files: FileList) => {
       const fd = new FormData();
       for (let i = 0; i < files.length; i++) fd.append("files", files[i]);
-      const res = await fetch("/api/assets/bg-music", { method: "POST", body: fd });
+      const res = await fetch("/api/assets/bg-music", { method: "POST", body: fd, credentials: "include" });
       if (!res.ok) throw new Error((await res.json()).error || "Failed");
       return res.json();
     },
@@ -247,7 +248,7 @@ export default function AutomatedShortsPage() {
     mutationFn: async (files: FileList) => {
       const fd = new FormData();
       for (let i = 0; i < files.length; i++) fd.append("files", files[i]);
-      const res = await fetch("/api/assets/logos", { method: "POST", body: fd });
+      const res = await fetch("/api/assets/logos", { method: "POST", body: fd, credentials: "include" });
       if (!res.ok) throw new Error((await res.json()).error || "Failed");
       return res.json();
     },
@@ -702,7 +703,7 @@ export default function AutomatedShortsPage() {
               </Card>
             ))}
           </div>
-        ) : projects.filter(p => p.projectType === "automated").length === 0 ? (
+        ) : projects.filter(p => p.projectType === PROJECT_TYPES.AUTOMATED).length === 0 ? (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -721,7 +722,7 @@ export default function AutomatedShortsPage() {
         ) : (
           <AnimatePresence mode="popLayout">
             <div className="space-y-4">
-              {projects.filter(p => p.projectType === "automated").map((project) => (
+              {projects.filter(p => p.projectType === PROJECT_TYPES.AUTOMATED).map((project) => (
                 <ProjectCard
                   key={project.id}
                   project={project}

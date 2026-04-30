@@ -1,11 +1,12 @@
 import express, { type Express } from "express";
-import { createServer, type Server } from "http";
+import { type Server } from "http";
 import { storage } from "./storage";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { ensureDirectories, runPipeline } from "./pipeline/processor";
-import { requireFeature } from "./auth";
+import { ensureDirectories } from "./pipeline/processor";
+import { requireAdmin } from "./auth";
+import { rateLimit } from "./rate-limit";
 import { listFormats, downloadVideo } from "./downloader/ytDlp";
 import {
   fetchElevenLabsVoices,
@@ -19,6 +20,7 @@ import {
   upsertElevenLabsSettings,
 } from "./elevenlabs/settings";
 import { AUTOMATED_SHORTS_MAX_TABS } from "../shared/project-limits";
+import { PROJECT_TYPES, COMBO_TYPES, type ProjectType } from "@shared/schema";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
@@ -34,6 +36,32 @@ ensureDirectories();
 function isWithinDir(baseDir: string, targetPath: string): boolean {
   const resolved = path.resolve(targetPath);
   return resolved.startsWith(path.resolve(baseDir));
+}
+
+function parseIntStrict(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const n = parseInt(String(value), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Per-user rate limits for yt-dlp endpoints. Keep formats more permissive
+// (it's a metadata probe), download tighter (each call hits YouTube heavily
+// and abusing it gets the cookies banned).
+const formatsRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  capacity: 30,
+  name: "downloader/formats",
+});
+const downloadRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  capacity: 10,
+  name: "downloader/download",
+});
+
+function sanitizeAssetName(originalName: string): string {
+  const base = path.basename(originalName, path.extname(originalName));
+  const cleaned = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100);
+  return cleaned || "asset";
 }
 
 function isValidAssetPath(targetPath: string): boolean {
@@ -211,8 +239,9 @@ export async function registerRoutes(
   }
   app.use("/downloads", express.static(downloadsDir));
 
-  app.get("/api/assets/bg-music", async (_req, res) => {
+  app.get("/api/assets/bg-music", async (req, res) => {
     try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
       const list = await assetsStorage.getBgMusicAssets();
       res.json(list);
     } catch (error: any) {
@@ -225,16 +254,14 @@ export async function registerRoutes(
     uploadBgMusic.array("files", 10),
     async (req, res) => {
       try {
+        if (!req.user) return res.status(401).json({ error: "Authentication required" });
         const files = req.files as Express.Multer.File[];
         if (!files?.length) {
           return res.status(400).json({ error: "No files uploaded" });
         }
         const created = await Promise.all(
           files.map((f) =>
-            assetsStorage.addBgMusicAsset(
-              path.basename(f.originalname, path.extname(f.originalname)),
-              f.path
-            )
+            assetsStorage.addBgMusicAsset(sanitizeAssetName(f.originalname), f.path)
           )
         );
         res.json(created);
@@ -244,8 +271,9 @@ export async function registerRoutes(
     }
   );
 
-  app.get("/api/assets/logos", async (_req, res) => {
+  app.get("/api/assets/logos", async (req, res) => {
     try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
       const list = await assetsStorage.getLogoAssets();
       res.json(list);
     } catch (error: any) {
@@ -258,16 +286,14 @@ export async function registerRoutes(
     uploadLogos.array("files", 10),
     async (req, res) => {
       try {
+        if (!req.user) return res.status(401).json({ error: "Authentication required" });
         const files = req.files as Express.Multer.File[];
         if (!files?.length) {
           return res.status(400).json({ error: "No files uploaded" });
         }
         const created = await Promise.all(
           files.map((f) =>
-            assetsStorage.addLogoAsset(
-              path.basename(f.originalname, path.extname(f.originalname)),
-              f.path
-            )
+            assetsStorage.addLogoAsset(sanitizeAssetName(f.originalname), f.path)
           )
         );
         res.json(created);
@@ -367,9 +393,18 @@ export async function registerRoutes(
 
   app.get("/api/projects/:id", async (req, res) => {
     try {
-      const project = await storage.getProject(parseInt(req.params.id));
+      const id = parseIntStrict(req.params.id);
+      if (id === null) return res.status(400).json({ error: "Invalid project id" });
+      const project = await storage.getProject(id);
       if (!project) {
         return res.status(404).json({ error: "Project not found" });
+      }
+      if (
+        req.user?.role !== "admin" &&
+        project.userId != null &&
+        project.userId !== req.user?.id
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       res.json(project);
     } catch (error: any) {
@@ -377,7 +412,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/elevenlabs/settings", async (_req, res) => {
+  app.get("/api/elevenlabs/settings", requireAdmin, async (_req, res) => {
     try {
       const settings = await getElevenLabsSettings();
       res.json(settings);
@@ -388,7 +423,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/elevenlabs/settings", async (req, res) => {
+  app.post("/api/elevenlabs/settings", requireAdmin, async (req, res) => {
     try {
       const { apiKey, plan, keyLabel } = req.body as {
         apiKey?: string;
@@ -441,7 +476,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/downloader/formats", async (req, res) => {
+  app.post("/api/downloader/formats", formatsRateLimit, async (req, res) => {
     try {
       const { url } = req.body as { url?: string };
       if (!url || !url.trim()) {
@@ -454,7 +489,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/downloader/download", async (req, res) => {
+  app.post("/api/downloader/download", downloadRateLimit, async (req, res) => {
     try {
       const { url, formatId, isVideoOnly } = req.body as {
         url?: string;
@@ -525,11 +560,11 @@ export async function registerRoutes(
       try {
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         const bgMusicFile = files.bgMusic?.[0];
-        const bgMusicAssetId = req.body.bgMusicAssetId ? parseInt(String(req.body.bgMusicAssetId), 10) : null;
+        const bgMusicAssetId = parseIntStrict(req.body.bgMusicAssetId);
         let bgMusicPath: string;
         if (bgMusicFile) {
           bgMusicPath = bgMusicFile.path;
-        } else if (bgMusicAssetId && !isNaN(bgMusicAssetId)) {
+        } else if (bgMusicAssetId !== null) {
           const asset = await assetsStorage.getBgMusicAssetById(bgMusicAssetId);
           if (!asset) return res.status(400).json({ error: "Invalid bgMusicAssetId" });
           bgMusicPath = asset.filePath;
@@ -538,11 +573,11 @@ export async function registerRoutes(
         }
 
         const logoFile = files.logo?.[0];
-        const logoAssetId = req.body.logoAssetId ? parseInt(String(req.body.logoAssetId), 10) : null;
+        const logoAssetId = parseIntStrict(req.body.logoAssetId);
         let logoPath: string | undefined;
         if (logoFile) {
           logoPath = logoFile.path;
-        } else if (logoAssetId && !isNaN(logoAssetId)) {
+        } else if (logoAssetId !== null) {
           const asset = await assetsStorage.getLogoAssetById(logoAssetId);
           if (!asset) return res.status(400).json({ error: "Invalid logoAssetId" });
           logoPath = asset.filePath;
@@ -633,8 +668,8 @@ export async function registerRoutes(
         }
 
         let bgMusicPath: string | null = files.bgMusic?.[0]?.path ?? null;
-        const bgMusicAssetId = req.body.bgMusicAssetId != null ? parseInt(String(req.body.bgMusicAssetId), 10) : null;
-        if (!bgMusicPath && bgMusicAssetId != null && !isNaN(bgMusicAssetId)) {
+        const bgMusicAssetId = parseIntStrict(req.body.bgMusicAssetId);
+        if (!bgMusicPath && bgMusicAssetId !== null) {
           const asset = await assetsStorage.getBgMusicAssetById(bgMusicAssetId);
           if (!asset) return res.status(400).json({ error: "Invalid bgMusicAssetId" });
           bgMusicPath = asset.filePath;
@@ -644,8 +679,8 @@ export async function registerRoutes(
         }
 
         let logoPath: string | null = files.logo?.[0]?.path ?? null;
-        const logoAssetId = req.body.logoAssetId != null ? parseInt(String(req.body.logoAssetId), 10) : null;
-        if (!logoPath && logoAssetId != null && !isNaN(logoAssetId)) {
+        const logoAssetId = parseIntStrict(req.body.logoAssetId);
+        if (!logoPath && logoAssetId !== null) {
           const asset = await assetsStorage.getLogoAssetById(logoAssetId);
           if (!asset) return res.status(400).json({ error: "Invalid logoAssetId" });
           logoPath = asset.filePath;
@@ -659,12 +694,11 @@ export async function registerRoutes(
         const isVerticalSource = req.body.isVerticalSource === "true";
         const cropType = (req.body.cropType as string) || "none";
         const hookEnabled = req.body.hookEnabled === "true";
-        console.log(`[routes] isVerticalSource raw="${req.body.isVerticalSource}" parsed=${isVerticalSource}, cropType=${cropType}, hookEnabled=${hookEnabled}`);
 
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: projectName,
-          projectType: "classic",
+          projectType: PROJECT_TYPES.CLASSIC,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
@@ -678,7 +712,8 @@ export async function registerRoutes(
           hookEnabled,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
 
         res.status(201).json(project);
       } catch (error: any) {
@@ -703,7 +738,7 @@ export async function registerRoutes(
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Auto-Ducked Audio",
-          projectType: "ducking",
+          projectType: PROJECT_TYPES.DUCKING,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
@@ -711,7 +746,8 @@ export async function registerRoutes(
           bgMusicPath: files.bgMusic[0].path,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -730,14 +766,15 @@ export async function registerRoutes(
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Smart Cropped Video",
-          projectType: "crop",
+          projectType: PROJECT_TYPES.CROP,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
           sourceVideoPath: files.sourceVideo[0].path,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -756,14 +793,15 @@ export async function registerRoutes(
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Cinematic Color Grade",
-          projectType: "color",
+          projectType: PROJECT_TYPES.COLOR,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
           sourceVideoPath: files.sourceVideo[0].path,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -784,7 +822,7 @@ export async function registerRoutes(
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Motion Tracked Video",
-          projectType: "motion-track",
+          projectType: PROJECT_TYPES.MOTION_TRACK,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
@@ -795,7 +833,8 @@ export async function registerRoutes(
           captionStyle: overlayText,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -814,14 +853,15 @@ export async function registerRoutes(
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Studio Clear Vocal",
-          projectType: "isolate",
+          projectType: PROJECT_TYPES.ISOLATE,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
           sourceVideoPath: files.sourceMedia[0].path, // Store both audio/video in the same path column
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -840,14 +880,15 @@ export async function registerRoutes(
         const project = await storage.createProject({
           userId: req.user?.id || null,
           name: (req.body.name as string) || "Podcast Highlights",
-          projectType: "highlights",
+          projectType: PROJECT_TYPES.HIGHLIGHTS,
           status: "processing",
           currentStep: "uploading",
           progress: 5,
           sourceVideoPath: files.sourceVideo[0].path,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -865,10 +906,15 @@ export async function registerRoutes(
     async (req, res) => {
       try {
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-        const comboType = req.body.comboType as string; // combo-viral, combo-podcast, etc.
+        const comboType = req.body.comboType as string;
 
         if (!comboType) {
           return res.status(400).json({ error: "comboType is required" });
+        }
+        if (!COMBO_TYPES.includes(comboType as ProjectType)) {
+          return res.status(400).json({
+            error: `Invalid comboType. Allowed: ${COMBO_TYPES.join(", ")}`,
+          });
         }
 
         // We hijack captionStyle to pass dynamic text inputs like overlayText or specific subtitle styles
@@ -887,7 +933,8 @@ export async function registerRoutes(
           captionStyle: extraText,
         });
 
-        import("./pipeline/processor").then((mod) => mod.queuePipeline(project.id)).catch(console.error);
+        const { queuePipeline } = await import("./pipeline/processor");
+        queuePipeline(project.id);
         res.status(201).json(project);
       } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -897,10 +944,18 @@ export async function registerRoutes(
 
   app.delete("/api/projects/:id", async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseIntStrict(req.params.id);
+      if (id === null) return res.status(400).json({ error: "Invalid project id" });
       const project = await storage.getProject(id);
       if (!project) {
         return res.status(404).json({ error: "Project not found" });
+      }
+      if (
+        req.user?.role !== "admin" &&
+        project.userId != null &&
+        project.userId !== req.user?.id
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       cleanupProjectFiles(project);
@@ -913,9 +968,22 @@ export async function registerRoutes(
 
   app.get("/api/projects/:id/download/:type", async (req, res) => {
     try {
-      const project = await storage.getProject(parseInt(req.params.id));
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const id = parseIntStrict(req.params.id);
+      if (id === null) return res.status(400).json({ error: "Invalid project id" });
+      const project = await storage.getProject(id);
       if (!project) {
         return res.status(404).json({ error: "Project not found" });
+      }
+      if (
+        req.user.role !== "admin" &&
+        project.userId != null &&
+        project.userId !== req.user.id
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (req.params.type !== "clear" && req.params.type !== "caption") {
+        return res.status(400).json({ error: "Invalid download type" });
       }
 
       const filePath =
@@ -941,7 +1009,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/cleanup", async (_req, res) => {
+  app.delete("/api/cleanup", requireAdmin, async (_req, res) => {
     try {
       // Calculate size before cleanup
       const getDirSize = (dir: string): number => {

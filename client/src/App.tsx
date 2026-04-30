@@ -12,7 +12,6 @@ import Highlights from "@/pages/highlights";
 import ColorGrade from "@/pages/color-grade";
 import VocalIsolate from "@/pages/vocal-isolate";
 import MotionTrack from "@/pages/motion-track";
-import StyleStudio from "@/pages/style-studio";
 import ViralCombo from "@/pages/combos/viral";
 import PodcastCombo from "@/pages/combos/podcast";
 import ActionCombo from "@/pages/combos/action";
@@ -29,9 +28,19 @@ import AdminSettingsPage from "@/pages/admin/settings";
 import { MainLayout } from "@/components/layout";
 import { Loader2 } from "lucide-react";
 
-function ProtectedRoute({ feature, component: Component }: { feature?: string; component: React.ComponentType }) {
-  const { hasFeature } = useAuth();
-  if (feature && !hasFeature(feature)) {
+function ProtectedRoute({
+  feature,
+  adminOnly,
+  component: Component,
+}: {
+  feature?: string;
+  adminOnly?: boolean;
+  component: React.ComponentType;
+}) {
+  const { hasFeature, isAdmin } = useAuth();
+  const denied =
+    (adminOnly && !isAdmin) || (feature && !hasFeature(feature));
+  if (denied) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <div className="text-center space-y-3">
@@ -60,15 +69,14 @@ function AuthenticatedApp() {
         <Route path="/color-grade" component={() => <ProtectedRoute feature="color-grade" component={ColorGrade} />} />
         <Route path="/vocal-isolate" component={() => <ProtectedRoute feature="vocal-isolate" component={VocalIsolate} />} />
         <Route path="/motion-track" component={() => <ProtectedRoute feature="motion-track" component={MotionTrack} />} />
-        <Route path="/style-studio" component={() => <ProtectedRoute feature="style-studio" component={StyleStudio} />} />
         <Route path="/combos/viral" component={() => <ProtectedRoute feature="combos" component={ViralCombo} />} />
         <Route path="/combos/podcast" component={() => <ProtectedRoute feature="combos" component={PodcastCombo} />} />
         <Route path="/combos/action" component={() => <ProtectedRoute feature="combos" component={ActionCombo} />} />
         <Route path="/combos/cinematic" component={() => <ProtectedRoute feature="combos" component={CinematicCombo} />} />
         <Route path="/combos/meme" component={() => <ProtectedRoute feature="combos" component={MemeCombo} />} />
         {/* Admin routes */}
-        <Route path="/admin/users" component={() => <ProtectedRoute component={AdminUsersPage} />} />
-        <Route path="/admin/settings" component={() => <ProtectedRoute component={AdminSettingsPage} />} />
+        <Route path="/admin/users" component={() => <ProtectedRoute adminOnly component={AdminUsersPage} />} />
+        <Route path="/admin/settings" component={() => <ProtectedRoute adminOnly component={AdminSettingsPage} />} />
         <Route component={NotFound} />
       </Switch>
     </MainLayout>

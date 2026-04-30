@@ -1,12 +1,18 @@
 import { db } from "../db";
-import { elevenLabsSettings } from "@shared/schema";
+import { globalSettings } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 export type ElevenLabsPlan = "free" | "paid";
 
+async function getOrCreateGlobalRow() {
+  const rows = await db.select().from(globalSettings).limit(1);
+  if (rows[0]) return rows[0];
+  const [created] = await db.insert(globalSettings).values({}).returning();
+  return created;
+}
+
 export async function getElevenLabsSettings() {
-  const rows = await db.select().from(elevenLabsSettings).limit(1);
-  const row = rows[0];
+  const row = (await db.select().from(globalSettings).limit(1))[0];
   if (!row) {
     return {
       hasKey: false,
@@ -14,10 +20,26 @@ export async function getElevenLabsSettings() {
       keyLabel: null as string | null,
     };
   }
+  const keys = row.elevenlabsKeys || [];
+  const active = keys.find((k) => k.isActive) || keys[0];
+  if (active?.key) {
+    return {
+      hasKey: true,
+      plan: (active.plan as ElevenLabsPlan) ?? "free",
+      keyLabel: active.name ?? null,
+    };
+  }
+  if (row.elevenlabsApiKey) {
+    return {
+      hasKey: true,
+      plan: (row.elevenlabsPlan as ElevenLabsPlan) ?? "free",
+      keyLabel: row.elevenlabsKeyLabel ?? null,
+    };
+  }
   return {
-    hasKey: true,
-    plan: (row.plan as ElevenLabsPlan) ?? ("free" as ElevenLabsPlan),
-    keyLabel: row.keyLabel ?? null,
+    hasKey: false,
+    plan: "free" as ElevenLabsPlan,
+    keyLabel: null as string | null,
   };
 }
 
@@ -34,32 +56,38 @@ export async function upsertElevenLabsSettings(input: {
   const keyLabel =
     typeof input.keyLabel === "string" ? input.keyLabel.trim() : null;
 
-  const rows = await db.select().from(elevenLabsSettings).limit(1);
-  const existing = rows[0];
-  if (existing) {
-    await db
-      .update(elevenLabsSettings)
-      .set({ apiKey, plan, keyLabel })
-      .where(eq(elevenLabsSettings.id, existing.id));
-  } else {
-    await db.insert(elevenLabsSettings).values({ apiKey, plan, keyLabel });
-  }
+  const existing = await getOrCreateGlobalRow();
+  await db
+    .update(globalSettings)
+    .set({
+      elevenlabsApiKey: apiKey,
+      elevenlabsPlan: plan,
+      elevenlabsKeyLabel: keyLabel,
+      updatedAt: new Date(),
+    })
+    .where(eq(globalSettings.id, existing.id));
 }
 
 export async function getActiveElevenLabsKey(): Promise<{
   apiKey: string;
   plan: ElevenLabsPlan;
 }> {
-  const rows = await db.select().from(elevenLabsSettings).limit(1);
-  const row = rows[0];
-  if (!row || !row.apiKey.trim()) {
-    throw new Error(
-      "ElevenLabs API key is not configured. Open the ElevenLabs page and save your key first.",
-    );
+  const row = (await db.select().from(globalSettings).limit(1))[0];
+  const keys = row?.elevenlabsKeys || [];
+  const active = keys.find((k) => k.isActive) || keys[0];
+  if (active?.key?.trim()) {
+    return {
+      apiKey: active.key.trim(),
+      plan: (active.plan as ElevenLabsPlan) ?? "free",
+    };
   }
-  return {
-    apiKey: row.apiKey.trim(),
-    plan: (row.plan as ElevenLabsPlan) ?? ("free" as ElevenLabsPlan),
-  };
+  if (row?.elevenlabsApiKey?.trim()) {
+    return {
+      apiKey: row.elevenlabsApiKey.trim(),
+      plan: (row.elevenlabsPlan as ElevenLabsPlan) ?? "free",
+    };
+  }
+  throw new Error(
+    "ElevenLabs API key is not configured. Open Admin → Settings and save your key first.",
+  );
 }
-

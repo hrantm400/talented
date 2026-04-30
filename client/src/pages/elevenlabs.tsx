@@ -77,6 +77,7 @@ export default function ElevenLabsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, voiceId: selectedVoiceId }),
+        credentials: "include",
       });
       if (!res.ok) {
         const msg = await res.text();
