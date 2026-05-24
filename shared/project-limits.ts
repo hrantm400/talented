@@ -1,0 +1,1 @@
+export const AUTOMATED_SHORTS_MAX_TABS = 40;
