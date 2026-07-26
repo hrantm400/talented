@@ -29,6 +29,8 @@ type AccessRequestRow = {
 const FEATURE_LABELS: Record<FeatureKey, string> = {
   "classic": "Auto-Shorts (Classic)",
   "automated-shorts": "Automated Shorts",
+  "automated-shorts-no-voiceover": "Automated Shorts No Voiceover",
+  "automated-shorts-factory": "Automated Shorts Factory",
   "elevenlabs": "ElevenLabs",
   "download": "Download Video",
   "voiceover-script": "Voiceover Script",

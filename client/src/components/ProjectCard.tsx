@@ -14,6 +14,7 @@ import {
   Trash2,
   RotateCw,
   Download,
+  Music,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -154,6 +155,30 @@ export function PipelineStatus({ project }: { project: Project }) {
             </Card>
           </a>
         </motion.div>
+      )}
+
+      {project.musicAttribution && (
+        <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
+          <div className="flex items-start gap-2">
+            <Music className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-amber-700 dark:text-amber-500">
+                Add this credit to the post description:
+              </p>
+              <p className="text-xs text-muted-foreground mt-1 break-words">
+                {project.musicAttribution}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigator.clipboard?.writeText(project.musicAttribution || "")}
+              className="text-xs px-2 py-1 rounded border border-border hover:bg-muted shrink-0"
+              title="Copy attribution"
+            >
+              Copy
+            </button>
+          </div>
+        </div>
       )}
     </motion.div>
   );

@@ -13,7 +13,8 @@ import {
   ensureAdminExists,
 } from "./auth";
 import { createAdminRouter } from "./admin/routes";
-import { startTelegramBot } from "./telegram/bot";
+import { startTelegramBot, onProjectTerminal } from "./telegram/bot";
+import { setProjectTerminalHook } from "./storage";
 
 const app = express();
 const httpServer = createServer(app);
@@ -99,8 +100,9 @@ app.use((req, res, next) => {
   // Ensure admin user exists
   await ensureAdminExists();
 
-  // Start Telegram bot
+  // Start Telegram bot + wire the batch-completion summary hook.
   startTelegramBot();
+  setProjectTerminalHook(onProjectTerminal);
 
   await registerRoutes(httpServer, app);
 

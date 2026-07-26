@@ -10,9 +10,9 @@ import ElevenLabsPage from "@/pages/elevenlabs";
 import DownloadPage from "@/pages/download";
 import VoiceoverScriptPage from "@/pages/voiceover-script";
 import AutomatedShortsPage from "@/pages/automated-shorts";
-import SettingsPage from "@/pages/settings";
+import AutomatedShortsNoVoiceoverPage from "@/pages/automated-shorts-no-voiceover";
+import AutomatedShortsFactoryPage from "@/pages/automated-shorts-factory";
 import LoginPage from "@/pages/login";
-import AdminUsersPage from "@/pages/admin/users";
 import AdminSettingsPage from "@/pages/admin/settings";
 import { MainLayout } from "@/components/layout";
 import { Loader2 } from "lucide-react";
@@ -51,9 +51,10 @@ function AuthenticatedApp() {
         <Route path="/download" component={() => <ProtectedRoute feature="download" component={DownloadPage} />} />
         <Route path="/voiceover-script" component={() => <ProtectedRoute feature="voiceover-script" component={VoiceoverScriptPage} />} />
         <Route path="/automated-shorts" component={() => <ProtectedRoute feature="automated-shorts" component={AutomatedShortsPage} />} />
-        <Route path="/settings" component={SettingsPage} />
-        {/* Admin routes */}
-        <Route path="/admin/users" component={() => <ProtectedRoute adminOnly component={AdminUsersPage} />} />
+        <Route path="/automated-shorts-no-voiceover" component={() => <ProtectedRoute feature="automated-shorts-no-voiceover" component={AutomatedShortsNoVoiceoverPage} />} />
+        <Route path="/automated-shorts-factory" component={() => <ProtectedRoute feature="automated-shorts-factory" component={AutomatedShortsFactoryPage} />} />
+        {/* Single consolidated settings page (admin). /settings kept as an alias. */}
+        <Route path="/settings" component={() => <ProtectedRoute adminOnly component={AdminSettingsPage} />} />
         <Route path="/admin/settings" component={() => <ProtectedRoute adminOnly component={AdminSettingsPage} />} />
         <Route component={NotFound} />
       </Switch>

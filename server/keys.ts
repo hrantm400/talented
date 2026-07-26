@@ -117,6 +117,21 @@ export async function getVideoModel(userId?: number | null): Promise<string> {
 }
 
 /**
+ * Resolve the model for the No-Voiceover SEGMENTS task (setup+epic curation).
+ * Personal override → global default → falls back to the video model so that
+ * "unset" behaves exactly like today.
+ */
+export async function getSegmentsModel(userId?: number | null): Promise<string> {
+  const [global] = await db.select().from(globalSettings).limit(1);
+  if (userId) {
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    if (user?.personalModelSegments) return user.personalModelSegments;
+  }
+  if (global?.defaultModelSegments) return global.defaultModelSegments;
+  return getVideoModel(userId);
+}
+
+/**
  * Resolve which Whisper model to use for this user's transcriptions.
  * Returns "local" to mean "use the bundled faster-whisper Python script" —
  * otherwise the value is forwarded to OpenRouter (e.g.

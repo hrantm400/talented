@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from "react";
+import { useState, useEffect, useMemo, Fragment } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -38,12 +38,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import { apiRequest } from "@/lib/queryClient";
 import { ProjectCard } from "@/components/ProjectCard";
 import { PaginatedProjectList } from "@/components/paginated-project-list";
+import { LogoLayoutEditor } from "@/components/logo-layout-editor";
 
 const DEFAULT_VOICE_KEY = "elevenlabs_default_voice_id";
 import { CaptionStyleSelector } from "@/components/caption-styles";
 
 type BgMusicAsset = { id: number; name: string };
-type LogoAsset = { id: number; name: string };
+type LogoAsset = { id: number; name: string; url?: string | null };
 type ElevenVoice = { voice_id: string; name: string; category?: string };
 
 type TabState = {
@@ -66,7 +67,7 @@ type TabState = {
   shortVideoFile: File | null;
 };
 
-const DURATION_OPTIONS = [8, 10, 15, 20, 25, 30, 45, 60] as const;
+const DURATION_OPTIONS = [25, 35, 45, 60] as const;
 
 function initialTab(): TabState {
   return {
@@ -84,13 +85,16 @@ function initialTab(): TabState {
   };
 }
 
-export default function AutomatedShortsPage() {
+export default function AutomatedShortsNoVoiceoverPage() {
   const { toast } = useToast();
   const [bgMusic, setBgMusic] = useState<File | null>(null);
   const [bgMusicAssetId, setBgMusicAssetId] = useState<string | undefined>();
   const [logo, setLogo] = useState<File | null>(null);
   const [logoAssetId, setLogoAssetId] = useState<string | undefined>();
   const [captionStyle, setCaptionStyle] = useState("capcut_green");
+  const [autoMusic, setAutoMusic] = useState(false);
+  const [autoMusicMood, setAutoMusicMood] = useState("auto");
+  const [logoEditorOpen, setLogoEditorOpen] = useState(false);
 
   const { data: bgMusicAssets = [], refetch: refetchBgMusic } = useQuery<BgMusicAsset[]>({
     queryKey: ["/api/assets/bg-music"],
@@ -107,6 +111,18 @@ export default function AutomatedShortsPage() {
     queryKey: ["/api/projects"],
     refetchInterval: 3000,
   });
+
+  // Preview URL for the logo editor: uploaded File → object URL (revoked on
+  // change), otherwise the selected library asset's public URL.
+  const logoPreviewUrl = useMemo(() => {
+    if (logo) return URL.createObjectURL(logo);
+    return logoAssets.find((a) => String(a.id) === logoAssetId)?.url ?? null;
+  }, [logo, logoAssetId, logoAssets]);
+  useEffect(() => {
+    return () => {
+      if (logoPreviewUrl && logoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(logoPreviewUrl);
+    };
+  }, [logoPreviewUrl]);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -148,7 +164,7 @@ export default function AutomatedShortsPage() {
     } catch {}
   }, [voices]);
   const [tabs, setTabs] = useState<TabState[]>([initialTab()]);
-  const [targetSeconds, setTargetSeconds] = useState(20);
+  const [targetSeconds, setTargetSeconds] = useState(25);
   const [videoType, setVideoType] = useState<"edited" | "raw">("raw");
 
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -214,6 +230,8 @@ export default function AutomatedShortsPage() {
       formData.append("videoType", videoType);
       formData.append("captionStyle", captionStyle);
       if (voiceId) formData.append("voiceId", voiceId);
+      formData.append("autoMusic", autoMusic ? "true" : "false");
+      if (autoMusic) formData.append("autoMusicMood", autoMusicMood);
 
       const tabsPayload = tabs.map((t) => ({
         projectName: t.projectName.trim() || undefined,
@@ -233,7 +251,7 @@ export default function AutomatedShortsPage() {
         if (tabs[i].shortVideoFile) formData.append(`shortVideo_${i}`, tabs[i].shortVideoFile!);
       }
 
-      const res = await fetch("/api/automated-shorts", {
+      const res = await fetch("/api/automated-shorts-no-voiceover", {
         method: "POST",
         body: formData,
         credentials: "include",
@@ -261,9 +279,8 @@ export default function AutomatedShortsPage() {
     },
   });
 
-  // Music is optional now — when none is chosen (or "Auto"), the server picks a
-  // random track from the library per take. So Run All no longer requires it.
   const canRun =
+    (autoMusic || bgMusic || bgMusicAssetId) &&
     tabs.length <= AUTOMATED_SHORTS_MAX_TABS &&
     tabs.every((t) => t.shortVideoUrl.trim() || t.shortVideoFile) &&
     !runMutation.isPending;
@@ -302,7 +319,7 @@ export default function AutomatedShortsPage() {
     <div className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-foreground">
-          Automated Shorts
+          Automated Shorts — No Voiceover
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
           Full + short video per tab. Script and voiceover generated from short. BGM and logo shared.
@@ -311,9 +328,54 @@ export default function AutomatedShortsPage() {
 
       <Card className="p-6 space-y-5">
         <h2 className="font-semibold">Shared</h2>
+
+        <div className="rounded-md border border-border p-3 space-y-3 bg-muted/20">
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="autoMusic"
+              checked={autoMusic}
+              onChange={(e) => setAutoMusic(e.target.checked)}
+              className="rounded border-gray-300 text-primary focus:ring-primary w-4 h-4"
+            />
+            <label htmlFor="autoMusic" className="text-sm font-medium cursor-pointer select-none">
+              🎵 Auto music (Jamendo, by mood)
+            </label>
+          </div>
+          {autoMusic && (
+            <div className="flex flex-wrap items-center gap-2 pl-6">
+              <span className="text-xs text-muted-foreground">Mood:</span>
+              <Select value={autoMusicMood} onValueChange={setAutoMusicMood}>
+                <SelectTrigger className="h-8 w-52 text-xs">
+                  <SelectValue placeholder="Mood" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">🪄 Auto (detect from video)</SelectItem>
+                  <SelectItem value="epic">Epic / Cinematic</SelectItem>
+                  <SelectItem value="emotional">Emotional</SelectItem>
+                  <SelectItem value="uplifting">Uplifting</SelectItem>
+                  <SelectItem value="dramatic">Dramatic</SelectItem>
+                  <SelectItem value="energetic">Energetic</SelectItem>
+                  <SelectItem value="happy">Happy</SelectItem>
+                  <SelectItem value="chill">Chill / Relax</SelectItem>
+                  <SelectItem value="dark">Dark / Tense</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-muted-foreground">
+                {autoMusicMood === "auto"
+                  ? "AI detects the mood of each video and picks fitting music automatically."
+                  : "A different commercial-safe CC-BY track is picked each run."}{" "}
+                Credit text is generated automatically.
+              </span>
+            </div>
+          )}
+        </div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Background Music</label>
+            <label className="text-sm font-medium">
+              Background Music {autoMusic ? "(optional — auto music is on)" : "*"}
+            </label>
             <div className="flex gap-2">
               <Select
                 value={bgMusic ? "" : (bgMusicAssetId ?? "")}
@@ -326,7 +388,7 @@ export default function AutomatedShortsPage() {
                   <SelectValue placeholder="Auto, saved tracks or upload" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="auto">🎲 Auto — random from library (different per take)</SelectItem>
+                  <SelectItem value="auto">🎲 Auto — from library (different per take)</SelectItem>
                   {bgMusicAssets.map((a) => (
                     <SelectItem key={a.id} value={String(a.id)}>
                       {a.name}
@@ -434,8 +496,23 @@ export default function AutomatedShortsPage() {
               </Button>
             </div>
             {logo && <Badge variant="secondary" className="text-xs">{logo.name}</Badge>}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-fit gap-1"
+              onClick={() => setLogoEditorOpen(true)}
+            >
+              🎯 Logo placement
+            </Button>
           </div>
         </div>
+
+        <LogoLayoutEditor
+          open={logoEditorOpen}
+          onOpenChange={setLogoEditorOpen}
+          logoUrl={logoPreviewUrl}
+        />
 
         <div className="space-y-2">
           <label className="text-sm font-medium">Voice (ElevenLabs)</label>
@@ -586,7 +663,7 @@ export default function AutomatedShortsPage() {
                 </Button>
               )}
             </div>
-            
+
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-2 flex-1">
                 <label className="text-xs font-medium text-muted-foreground">
@@ -631,21 +708,6 @@ export default function AutomatedShortsPage() {
                 <div className="flex items-center gap-2 pt-1">
                   <input
                     type="checkbox"
-                    id={`hookEnabled-${i}`}
-                    checked={tab.hookEnabled}
-                    onChange={(e) => updateTab(i, { hookEnabled: e.target.checked })}
-                    className="rounded border-gray-300 text-primary focus:ring-primary w-4 h-4"
-                  />
-                  <label htmlFor={`hookEnabled-${i}`} className="text-sm cursor-pointer select-none">
-                    AI Hook Intro
-                  </label>
-                  <span className="text-xs text-muted-foreground">
-                    (3-13s engaging clip at the start)
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 pt-1">
-                  <input
-                    type="checkbox"
                     id={`twoTakes-${i}`}
                     checked={tab.twoTakes}
                     onChange={(e) => updateTab(i, { twoTakes: e.target.checked })}
@@ -655,7 +717,7 @@ export default function AutomatedShortsPage() {
                     Make 2 unique shorts from this source
                   </label>
                   <span className="text-xs text-muted-foreground">
-                    (different voiceover & different highlights)
+                    (different highlights & logo position)
                   </span>
                 </div>
               </div>
@@ -720,7 +782,7 @@ export default function AutomatedShortsPage() {
           )}
         </Button>
       </div>
-      
+
       <div className="mt-12 space-y-6">
         <div className="flex items-center justify-between">
           <div>
@@ -759,7 +821,7 @@ export default function AutomatedShortsPage() {
               </Card>
             ))}
           </div>
-        ) : projects.filter(p => p.projectType === PROJECT_TYPES.AUTOMATED && !(p as any).batchId).length === 0 ? (
+        ) : projects.filter(p => p.projectType === PROJECT_TYPES.AUTOMATED_NO_VOICEOVER && !(p as any).batchId).length === 0 ? (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -777,7 +839,7 @@ export default function AutomatedShortsPage() {
           </motion.div>
         ) : (
           <PaginatedProjectList
-            projects={projects.filter(p => p.projectType === PROJECT_TYPES.AUTOMATED && !(p as any).batchId)}
+            projects={projects.filter(p => p.projectType === PROJECT_TYPES.AUTOMATED_NO_VOICEOVER && !(p as any).batchId)}
             onDelete={(id: number) => deleteMutation.mutate(id)}
             onRetry={(id: number) => retryMutation.mutate(id)}
           />

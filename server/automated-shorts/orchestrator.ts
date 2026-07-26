@@ -44,11 +44,33 @@ export type RunAutomatedShortOptions = {
   fullVideoPath?: string;
   shortVideoUrl?: string;
   shortVideoPath?: string;
-  bgMusicPath: string;
+  bgMusicPath?: string;
   logoPath?: string | null;
   targetSeconds: number;
   videoType: VideoType;
   projectName?: string;
+  /**
+   * When true, background music is auto-selected from Jamendo (commercial-safe
+   * CC-BY) by mood instead of using a user-supplied track. bgMusicPath may be
+   * empty in that case.
+   */
+  autoMusic?: boolean;
+  /** Mood tag used for the Jamendo search (e.g. "epic", "emotional"). */
+  autoMusicMood?: string;
+  /** Resolved visual logo placement for this project (Take 1 or Take 2 default). */
+  logoLayout?: import("@shared/schema").LogoLayout | null;
+  // ── Factory extras (VO variant) ──
+  /** Groups this output with the rest of a factory run. */
+  batchId?: string;
+  /** Per-variant render config (mirror/noise/top card/outro). */
+  variantConfig?: import("@shared/schema").VariantConfig | null;
+  /** Logo corner (top-left / top-right). */
+  logoPosition?: "top-left" | "top-right";
+  /** Pre-generated headline for the top card (skips a Gemini call). */
+  hookTitle?: string;
+  /** Google-Sheets ordering: source number (shared by takes) + variant label. */
+  sheetSourceNumber?: number;
+  sheetVariantLabel?: string;
   isVerticalSource?: boolean;
   cropType?: string;
   hookEnabled?: boolean;
@@ -111,12 +133,18 @@ export async function runAutomatedShort(
     progress: 5,
     bgMusicPath,
     logoPath: logoPath || null,
+    logoPosition: options.logoPosition || "top-right",
     captionStyle,
     isVerticalSource: manualIsVerticalSource,
     cropType,
     hookEnabled: !!options.hookEnabled,
     originalVideoUrl: fullVideoUrl?.trim() || shortVideoUrl?.trim() || null,
     shortVideoUrl: shortVideoUrl?.trim() || null,
+    ...(options.batchId ? { batchId: options.batchId } : {}),
+    ...(options.variantConfig ? { variantConfig: options.variantConfig } : {}),
+    ...(options.hookTitle ? { hookTitle: options.hookTitle } : {}),
+    ...(options.sheetSourceNumber != null ? { sheetSourceNumber: options.sheetSourceNumber } : {}),
+    ...(options.sheetVariantLabel ? { sheetVariantLabel: options.sheetVariantLabel } : {}),
   });
 
   // 2. Spawn the heavy asynchronous tasks in the background

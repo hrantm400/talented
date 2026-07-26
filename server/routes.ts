@@ -15,6 +15,11 @@ import {
 } from "./elevenlabs/voiceover";
 import { generateViralVoiceoverScript } from "./voiceover-script/openrouter";
 import { runAutomatedShort } from "./automated-shorts/orchestrator";
+import { runAutomatedShortNV } from "./automated-shorts/orchestrator-no-voiceover";
+import { runFactory, planFactory, generateFromPlan, nextSourceNumber, DEFAULT_FACTORY_RULES, DEFAULT_NV_PROFILES, DEFAULT_VO_PROFILES } from "./automated-shorts/factory";
+import type { FactoryPlan, FactoryVariantSlot } from "./automated-shorts/factory";
+import type { VariantProfile } from "@shared/schema";
+import { MOOD_TAGS } from "./pipeline/gemini";
 import * as assetsStorage from "./assets/storage";
 import {
   getElevenLabsSettings,
@@ -37,6 +42,23 @@ ensureDirectories();
 function isWithinDir(baseDir: string, targetPath: string): boolean {
   const resolved = path.resolve(targetPath);
   return resolved.startsWith(path.resolve(baseDir));
+}
+
+// Factory "plan → edit → generate": a resolved plan (downloaded source paths +
+// computed variant slots) is held here between the /plan and /generate calls.
+// TTL'd so abandoned plans (and their temp downloads' references) don't leak.
+const factoryPlanStore = new Map<string, { plan: FactoryPlan; expires: number }>();
+const FACTORY_PLAN_TTL_MS = 30 * 60 * 1000;
+function storeFactoryPlan(plan: FactoryPlan): void {
+  const now = Date.now();
+  factoryPlanStore.forEach((v, k) => { if (v.expires < now) factoryPlanStore.delete(k); });
+  factoryPlanStore.set(plan.batchId, { plan, expires: now + FACTORY_PLAN_TTL_MS });
+}
+function getFactoryPlan(batchId: string): FactoryPlan | null {
+  const e = factoryPlanStore.get(batchId);
+  if (!e) return null;
+  if (e.expires < Date.now()) { factoryPlanStore.delete(batchId); return null; }
+  return e.plan;
 }
 
 function parseIntStrict(value: unknown): number | null {
@@ -271,9 +293,11 @@ export async function registerRoutes(
         if (!files?.length) {
           return res.status(400).json({ error: "No files uploaded" });
         }
+        const rawMood = typeof req.body?.mood === "string" ? req.body.mood.trim() : "";
+        const mood = MOOD_TAGS.includes(rawMood as any) ? rawMood : null;
         const created = await Promise.all(
           files.map((f) =>
-            assetsStorage.addBgMusicAsset(sanitizeAssetName(f.originalname), f.path)
+            assetsStorage.addBgMusicAsset(sanitizeAssetName(f.originalname), f.path, mood)
           )
         );
         res.json(created);
@@ -283,11 +307,99 @@ export async function registerRoutes(
     }
   );
 
+  // Update a track's mood tag (Mood Music Library management).
+  app.patch("/api/assets/bg-music/:id", async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const id = parseIntStrict(req.params.id);
+      if (id === null) return res.status(400).json({ error: "Invalid id" });
+      const rawMood = typeof req.body?.mood === "string" ? req.body.mood.trim() : "";
+      const mood = MOOD_TAGS.includes(rawMood as any) ? rawMood : null;
+      const row = await assetsStorage.updateBgMusicAssetMood(id, mood);
+      if (!row) return res.status(404).json({ error: "Not found" });
+      res.json(row);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/assets/bg-music/:id", async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const id = parseIntStrict(req.params.id);
+      if (id === null) return res.status(400).json({ error: "Invalid id" });
+      const asset = await assetsStorage.getBgMusicAssetById(id);
+      await assetsStorage.deleteBgMusicAsset(id);
+      if (asset?.filePath) { try { fs.unlinkSync(asset.filePath); } catch {} }
+      res.json({ ok: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/assets/logos", async (req, res) => {
     try {
       if (!req.user) return res.status(401).json({ error: "Authentication required" });
       const list = await assetsStorage.getLogoAssets();
-      res.json(list);
+      // Expose a public image URL (uploads/ is statically served) so the logo
+      // placement editor can preview the actual logo.
+      const withUrls = list.map((a: any) => ({
+        ...a,
+        url: a.filePath ? `/uploads/assets/logos/${path.basename(a.filePath)}` : null,
+      }));
+      res.json(withUrls);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Logo placement defaults (visual editor, No-Voiceover variant) ──
+  const DEFAULT_LOGO_LAYOUT_T1 = { xPct: 0.35, yPct: 0.015, widthPct: 0.30, opacity: 1 };
+  const DEFAULT_LOGO_LAYOUT_T2 = { xPct: 0.04, yPct: 0.015, widthPct: 0.30, opacity: 1 };
+
+  app.get("/api/logo-layout", async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const { db } = await import("./db");
+      const { globalSettings } = await import("@shared/schema");
+      const [g] = await db.select().from(globalSettings).limit(1);
+      res.json({
+        take1: g?.logoLayoutTake1 || DEFAULT_LOGO_LAYOUT_T1,
+        take2: g?.logoLayoutTake2 || DEFAULT_LOGO_LAYOUT_T2,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.put("/api/logo-layout", requireAdmin, async (req, res) => {
+    try {
+      const { take1, take2 } = req.body as { take1?: any; take2?: any };
+      const clamp01 = (n: any, d: number) =>
+        typeof n === "number" && isFinite(n) ? Math.max(0, Math.min(1, n)) : d;
+      const norm = (l: any, def: any) =>
+        l
+          ? {
+              xPct: clamp01(l.xPct, def.xPct),
+              yPct: clamp01(l.yPct, def.yPct),
+              widthPct: Math.max(0.05, Math.min(1, typeof l.widthPct === "number" ? l.widthPct : def.widthPct)),
+              opacity: clamp01(l.opacity, def.opacity),
+            }
+          : def;
+      const { db } = await import("./db");
+      const { globalSettings } = await import("@shared/schema");
+      const [g] = await db.select().from(globalSettings).limit(1);
+      const updates = {
+        logoLayoutTake1: norm(take1, DEFAULT_LOGO_LAYOUT_T1),
+        logoLayoutTake2: norm(take2, DEFAULT_LOGO_LAYOUT_T2),
+      };
+      if (g) {
+        const { eq } = await import("drizzle-orm");
+        await db.update(globalSettings).set(updates).where(eq(globalSettings.id, g.id));
+      } else {
+        await db.insert(globalSettings).values(updates as any);
+      }
+      res.json({ ok: true, ...updates });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -329,6 +441,7 @@ export async function registerRoutes(
         googleServiceAccountJson,
         personalModelScript,
         personalModelVideo,
+        personalModelSegments,
         personalModelWhisper,
       } = req.body;
 
@@ -341,6 +454,7 @@ export async function registerRoutes(
       if (googleServiceAccountJson !== undefined) updates.googleServiceAccountJson = googleServiceAccountJson || null;
       if (personalModelScript !== undefined) updates.personalModelScript = personalModelScript || null;
       if (personalModelVideo !== undefined) updates.personalModelVideo = personalModelVideo || null;
+      if (personalModelSegments !== undefined) updates.personalModelSegments = personalModelSegments || null;
       if (personalModelWhisper !== undefined) updates.personalModelWhisper = personalModelWhisper || null;
 
       const { db } = await import("./db");
@@ -703,16 +817,21 @@ export async function registerRoutes(
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         const bgMusicFile = files.bgMusic?.[0];
         const bgMusicAssetId = parseIntStrict(req.body.bgMusicAssetId);
-        let bgMusicPath: string;
+        let userBgMusicPath: string | undefined;
         if (bgMusicFile) {
-          bgMusicPath = bgMusicFile.path;
+          userBgMusicPath = bgMusicFile.path;
         } else if (bgMusicAssetId !== null) {
           const asset = await assetsStorage.getBgMusicAssetById(bgMusicAssetId);
           if (!asset) return res.status(400).json({ error: "Invalid bgMusicAssetId" });
-          bgMusicPath = asset.filePath;
-        } else {
-          return res.status(400).json({ error: "Background music (file or saved) is required" });
+          userBgMusicPath = asset.filePath;
         }
+        // No manual track → auto-pick a RANDOM song from the Mood Library.
+        // Called per take so each gets a different track (kept quiet in the mix).
+        const pickMusic = async (): Promise<string | undefined> => {
+          if (userBgMusicPath) return userBgMusicPath;
+          try { const t = await assetsStorage.getRandomBgMusicByMood(null); return t?.filePath || undefined; }
+          catch { return undefined; }
+        };
 
         const logoFile = files.logo?.[0];
         const logoAssetId = parseIntStrict(req.body.logoAssetId);
@@ -771,6 +890,13 @@ export async function registerRoutes(
           const voiceId = req.body.voiceId?.trim() || undefined;
           const baseName = tab.projectName?.trim() || `Automated Short ${i + 1}`;
           const wantTwoTakes = !!tab.twoTakes;
+          // One sequential SOURCE number per tab (shared by Take 1 / Take 2) so
+          // the "old automated short vo" Google-Sheet tab stays sorted.
+          const sourceNumber = await nextSourceNumber();
+          // Auto background music (a different library track per take unless the
+          // user uploaded one).
+          const take1Music = await pickMusic();
+          const take2Music = await pickMusic();
           // Take 1 always uses the global caption style. Only Take 2 of a
           // two-takes pair uses the neon_pop alt style so the two outputs
           // are visually distinguishable.
@@ -816,7 +942,7 @@ export async function registerRoutes(
             fullVideoPath: fullFile?.path,
             shortVideoUrl,
             shortVideoPath: shortFile?.path,
-            bgMusicPath,
+            bgMusicPath: take1Music,
             logoPath: logoPath || null,
             targetSeconds,
             videoType,
@@ -830,6 +956,8 @@ export async function registerRoutes(
           const firstResult = await runAutomatedShort({
             ...baseOpts,
             projectName: wantTwoTakes ? `${baseName} — Take 1` : baseName,
+            sheetSourceNumber: sourceNumber,
+            sheetVariantLabel: "take 1",
             onScriptGenerated: resolveFirstScript || undefined,
             onSourcesReady: resolveFirstSources || undefined,
             onError: onTake1Error,
@@ -873,7 +1001,7 @@ export async function registerRoutes(
               status: "processing",
               currentStep: "transcription",
               progress: 8,
-              bgMusicPath,
+              bgMusicPath: take2Music,
               logoPath: take2LogoPath,
               logoPosition: take2LogoPosition,
               captionStyle: take2CaptionStyle,
@@ -882,6 +1010,8 @@ export async function registerRoutes(
               hookEnabled: !!tab.hookEnabled,
               originalVideoUrl: fullVideoUrl || shortVideoUrl || null,
               shortVideoUrl: shortVideoUrl || null,
+              sheetSourceNumber: sourceNumber,
+              sheetVariantLabel: "take 2",
               errorMessage: "Waiting for Take 1's script to finish before starting…",
             });
             results.push({
@@ -952,6 +1082,568 @@ export async function registerRoutes(
       }
     }
   );
+
+  // ───────────────────────────────────────────────────────────────────────
+  // "Automated Shorts — No Voiceover" — standalone copy of the handler above.
+  // Stamps the AUTOMATED_NO_VOICEOVER project type and routes through the NV
+  // orchestrator so this feature can be modified independently later.
+  // ───────────────────────────────────────────────────────────────────────
+  app.post(
+    "/api/automated-shorts-no-voiceover",
+    upload.fields(automatedShortsFields),
+    async (req, res) => {
+      try {
+        const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+        // Auto-music (Jamendo): when on, a user-supplied track is not required.
+        const autoMusic = req.body.autoMusic === "true" || req.body.autoMusic === "1";
+        const autoMusicMood = (req.body.autoMusicMood as string)?.trim() || "epic";
+        // Resolve the global visual logo layouts (Take 1 / Take 2 defaults).
+        const [gLogo] = await (await import("./db")).db
+          .select()
+          .from((await import("@shared/schema")).globalSettings)
+          .limit(1);
+        const logoLayoutTake1 = gLogo?.logoLayoutTake1 || { xPct: 0.35, yPct: 0.015, widthPct: 0.30, opacity: 1 };
+        const logoLayoutTake2 = gLogo?.logoLayoutTake2 || { xPct: 0.04, yPct: 0.015, widthPct: 0.30, opacity: 1 };
+        const bgMusicFile = files.bgMusic?.[0];
+        const wantLibraryAuto = req.body.bgMusicAssetId === "auto";
+        const bgMusicAssetId = parseIntStrict(req.body.bgMusicAssetId);
+        let bgMusicPath: string = "";
+        if (bgMusicFile) {
+          bgMusicPath = bgMusicFile.path;
+        } else if (bgMusicAssetId !== null) {
+          const asset = await assetsStorage.getBgMusicAssetById(bgMusicAssetId);
+          if (!asset) return res.status(400).json({ error: "Invalid bgMusicAssetId" });
+          bgMusicPath = asset.filePath;
+        } else if (!autoMusic && !wantLibraryAuto) {
+          return res.status(400).json({ error: "Background music (file or saved) is required" });
+        }
+        // "Auto — from library": pick a RANDOM track from the Mood Library per
+        // take (separate from the Jamendo auto-music). Uploaded/saved wins.
+        const pickMusic = async (): Promise<string | undefined> => {
+          if (bgMusicPath) return bgMusicPath;
+          if (wantLibraryAuto) {
+            try { const t = await assetsStorage.getRandomBgMusicByMood(null); return t?.filePath || undefined; }
+            catch { return undefined; }
+          }
+          return undefined;
+        };
+
+        const logoFile = files.logo?.[0];
+        const logoAssetId = parseIntStrict(req.body.logoAssetId);
+        let logoPath: string | undefined;
+        if (logoFile) {
+          logoPath = logoFile.path;
+        } else if (logoAssetId !== null) {
+          const asset = await assetsStorage.getLogoAssetById(logoAssetId);
+          if (!asset) return res.status(400).json({ error: "Invalid logoAssetId" });
+          logoPath = asset.filePath;
+        }
+
+        const tabsJson = req.body.tabs as string;
+        if (!tabsJson) {
+          return res.status(400).json({ error: "tabs is required" });
+        }
+        let tabs: Array<{ projectName?: string; isVerticalSource?: boolean; cropType?: string; hookEnabled?: boolean; twoTakes?: boolean; take2LogoAssetId?: number | null; take2LogoPosition?: "top-right" | "top-left"; fullVideoUrl?: string; shortVideoUrl?: string }>;
+        try {
+          tabs = JSON.parse(tabsJson);
+        } catch {
+          return res.status(400).json({ error: "tabs must be valid JSON array" });
+        }
+        if (!Array.isArray(tabs) || tabs.length === 0) {
+          return res.status(400).json({ error: "At least one tab is required" });
+        }
+        if (tabs.length > AUTOMATED_SHORTS_MAX_TABS) {
+          return res.status(400).json({
+            error: `A maximum of ${AUTOMATED_SHORTS_MAX_TABS} tabs is supported per run`,
+          });
+        }
+        const targetSeconds = parseInt(String(req.body.targetSeconds || "20"), 10);
+        if (isNaN(targetSeconds) || targetSeconds < 8 || targetSeconds > 60) {
+          return res.status(400).json({ error: "targetSeconds must be between 8 and 60" });
+        }
+        const videoType: "edited" | "raw" = req.body.videoType === "edited" ? "edited" : "raw";
+        const captionStyle = (req.body.captionStyle as string) || "capcut_green";
+
+        const results: Array<{ project: { id: number; name: string }; fullVideoPublicPath?: string }> = [];
+
+        const twoTakesCount = tabs.filter((t) => !!t.twoTakes).length;
+        console.log(
+          `[automated-shorts-nv] received ${tabs.length} tabs, ${twoTakesCount} marked twoTakes=true`
+        );
+
+        for (let i = 0; i < tabs.length; i++) {
+          const tab = tabs[i];
+          const fullFile = files[`fullVideo_${i}`]?.[0];
+          const shortFile = files[`shortVideo_${i}`]?.[0];
+          const fullVideoUrl = tab.fullVideoUrl?.trim() || undefined;
+          const shortVideoUrl = tab.shortVideoUrl?.trim() || undefined;
+
+          if (!shortVideoUrl && !shortFile) {
+            return res.status(400).json({ error: `Tab ${i + 1}: short video (URL or file) is required` });
+          }
+
+          const voiceId = req.body.voiceId?.trim() || undefined;
+          const baseName = tab.projectName?.trim() || `Automated Short (No VO) ${i + 1}`;
+          const wantTwoTakes = !!tab.twoTakes;
+          const take1CaptionStyle = captionStyle;
+          const take2CaptionStyle = "neon_pop";
+          // Sequential SOURCE number per tab (shared by takes) → the
+          // "old automated short nv" sheet tab stays sorted by your number.
+          const sourceNumber = await nextSourceNumber();
+          const take1Music = await pickMusic();
+          const take2Music = await pickMusic();
+
+          console.log(
+            `[automated-shorts-nv][tab ${i + 1}] name="${baseName}" twoTakes=${wantTwoTakes} ` +
+              `captionStyle=${captionStyle}` +
+              (wantTwoTakes ? ` (Take 2 → ${take2CaptionStyle})` : "")
+          );
+
+          let resolveFirstScript: ((s: string) => void) | null = null;
+          let rejectFirstScript: ((err: Error) => void) | null = null;
+          const firstScriptReady = wantTwoTakes
+            ? new Promise<string>((resolve, reject) => { resolveFirstScript = resolve; rejectFirstScript = reject; })
+            : null;
+
+          let resolveFirstSources: ((p: { cutSourcePath: string; aiAnalysisVideoPath: string; scriptSourcePath: string }) => void) | null = null;
+          let rejectFirstSources: ((err: Error) => void) | null = null;
+          const firstSourcesReady = wantTwoTakes
+            ? new Promise<{ cutSourcePath: string; aiAnalysisVideoPath: string; scriptSourcePath: string }>((resolve, reject) => { resolveFirstSources = resolve; rejectFirstSources = reject; })
+            : null;
+
+          const onTake1Error = wantTwoTakes
+            ? (err: Error) => {
+                if (rejectFirstScript) rejectFirstScript(err);
+                if (rejectFirstSources) rejectFirstSources(err);
+              }
+            : undefined;
+
+          const baseOpts = {
+            userId: req.user?.id || null,
+            fullVideoUrl,
+            fullVideoPath: fullFile?.path,
+            shortVideoUrl,
+            shortVideoPath: shortFile?.path,
+            bgMusicPath: take1Music,
+            logoPath: logoPath || null,
+            targetSeconds,
+            videoType,
+            isVerticalSource: !!tab.isVerticalSource,
+            cropType: tab.cropType || "none",
+            hookEnabled: !!tab.hookEnabled,
+            captionStyle: take1CaptionStyle,
+            voiceId,
+            autoMusic,
+            autoMusicMood,
+          };
+
+          const firstResult = await runAutomatedShortNV({
+            ...baseOpts,
+            projectName: wantTwoTakes ? `${baseName} — Take 1` : baseName,
+            logoLayout: logoLayoutTake1,
+            sheetSourceNumber: sourceNumber,
+            sheetVariantLabel: "take 1",
+            onScriptGenerated: resolveFirstScript || undefined,
+            onSourcesReady: resolveFirstSources || undefined,
+            onError: onTake1Error,
+          });
+          results.push(firstResult);
+
+          if (wantTwoTakes && firstScriptReady) {
+            let take2LogoPath: string | null = logoPath || null;
+            if (tab.take2LogoAssetId != null) {
+              const overrideAsset = await assetsStorage.getLogoAssetById(
+                tab.take2LogoAssetId
+              );
+              if (overrideAsset) {
+                take2LogoPath = overrideAsset.filePath;
+              }
+            }
+            const take2LogoPosition: "top-right" | "top-left" =
+              tab.take2LogoPosition === "top-left" ? "top-left" : "top-right";
+
+            const take2Project = await storage.createProject({
+              userId: req.user?.id || null,
+              name: `${baseName} — Take 2`,
+              projectType: PROJECT_TYPES.AUTOMATED_NO_VOICEOVER,
+              status: "processing",
+              currentStep: "transcription",
+              progress: 8,
+              bgMusicPath: take2Music,
+              logoPath: take2LogoPath,
+              logoPosition: take2LogoPosition,
+              captionStyle: take2CaptionStyle,
+              isVerticalSource: !!tab.isVerticalSource,
+              cropType: tab.cropType || "none",
+              hookEnabled: !!tab.hookEnabled,
+              originalVideoUrl: fullVideoUrl || shortVideoUrl || null,
+              shortVideoUrl: shortVideoUrl || null,
+              logoLayout: logoLayoutTake2,
+              sheetSourceNumber: sourceNumber,
+              sheetVariantLabel: "take 2",
+              errorMessage: "Waiting for Take 1's script to finish before starting…",
+            });
+            results.push({
+              project: { id: take2Project.id, name: take2Project.name },
+            });
+
+            (async () => {
+              try {
+                const [priorScript, sources] = await Promise.all([
+                  firstScriptReady,
+                  firstSourcesReady,
+                ]);
+                await storage.updateProject(take2Project.id, {
+                  errorMessage: null,
+                  currentStep: "uploading",
+                });
+                const { runAutomatedShortBackgroundForExistingNV } = await import(
+                  "./automated-shorts/orchestrator-no-voiceover"
+                );
+                await runAutomatedShortBackgroundForExistingNV(take2Project.id, {
+                  ...baseOpts,
+                  fullVideoUrl: undefined,
+                  shortVideoUrl: undefined,
+                  fullVideoPath: sources?.cutSourcePath,
+                  shortVideoPath: sources?.scriptSourcePath,
+                  logoPath: take2LogoPath,
+                  captionStyle: take2CaptionStyle,
+                  projectName: `${baseName} — Take 2`,
+                  avoidPriorScript: priorScript,
+                });
+              } catch (err: any) {
+                console.error(
+                  `[automated-shorts-nv] Take 2 failed for "${baseName}" (project=${take2Project.id}):`,
+                  err
+                );
+                try {
+                  await storage.updateProject(take2Project.id, {
+                    status: "failed",
+                    errorMessage: err.message || "Take 2 failed during initialization",
+                  });
+                } catch {}
+              }
+            })();
+          }
+        }
+
+        res.status(201).json({ projects: results.map((r) => r.project), fullVideoPaths: results.map((r) => r.fullVideoPublicPath) });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message || "Automated shorts (no voiceover) failed" });
+      }
+    }
+  );
+
+  // ── Factory config (rules + variant profiles + sheet tabs) ──
+  app.get("/api/factory-config", async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const { db } = await import("./db");
+      const { globalSettings } = await import("@shared/schema");
+      const [g] = await db.select().from(globalSettings).limit(1);
+      res.json({
+        rules: g?.factoryDurationRules?.length ? g.factoryDurationRules : DEFAULT_FACTORY_RULES,
+        nvProfiles: g?.factoryNvProfiles?.length ? g.factoryNvProfiles : DEFAULT_NV_PROFILES,
+        voProfiles: g?.factoryVoProfiles?.length ? g.factoryVoProfiles : DEFAULT_VO_PROFILES,
+        sheetTabNv: g?.factorySheetTabNv || "NV",
+        sheetTabVo: g?.factorySheetTabVo || "VO",
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Saved default logo placement for the Factory bulk-logo drag editor.
+  app.get("/api/factory/default-logo-layout", async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const { db } = await import("./db");
+      const { globalSettings } = await import("@shared/schema");
+      const [g] = await db.select().from(globalSettings).limit(1);
+      res.json({ layout: g?.factoryDefaultLogoLayout || null });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/api/factory/default-logo-layout", express.json(), async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Authentication required" });
+      const l = req.body?.layout;
+      let layout: any = null;
+      if (l && typeof l === "object") {
+        const c = (n: any) => Math.max(0, Math.min(1, Number(n)));
+        if ([l.xPct, l.yPct, l.widthPct, l.opacity].every((v: any) => typeof v === "number" && isFinite(v))) {
+          layout = { xPct: c(l.xPct), yPct: c(l.yPct), widthPct: c(l.widthPct), opacity: c(l.opacity) };
+        }
+      }
+      const { db } = await import("./db");
+      const { globalSettings } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const [g] = await db.select().from(globalSettings).limit(1);
+      if (g) await db.update(globalSettings).set({ factoryDefaultLogoLayout: layout }).where(eq(globalSettings.id, g.id));
+      else await db.insert(globalSettings).values({ factoryDefaultLogoLayout: layout });
+      res.json({ ok: true, layout });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/api/factory-config", requireAdmin, async (req, res) => {
+    try {
+      const { rules, nvProfiles, voProfiles, sheetTabNv, sheetTabVo } = req.body as any;
+      const { db } = await import("./db");
+      const { globalSettings } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      // Normalize each profile so a missing/invalid musicMood can never reach
+      // the factory (which would otherwise yield an empty bgMusicPath).
+      const VALID_MOODS = new Set(["auto", "epic", "emotional", "uplifting", "dramatic", "energetic", "happy", "chill", "dark", "none"]);
+      const clamp01 = (n: any) => Math.max(0, Math.min(1, Number(n)));
+      const normLogoLayout = (l: any) => {
+        if (!l || typeof l !== "object") return undefined;
+        const { xPct, yPct, widthPct, opacity } = l;
+        if (![xPct, yPct, widthPct, opacity].every((v) => typeof v === "number" && isFinite(v))) return undefined;
+        return { xPct: clamp01(xPct), yPct: clamp01(yPct), widthPct: clamp01(widthPct), opacity: clamp01(opacity) };
+      };
+      const normProfiles = (arr: any[]) => arr.map((p) => ({
+        ...p,
+        musicMood: typeof p?.musicMood === "string" && VALID_MOODS.has(p.musicMood) ? p.musicMood : "auto",
+        // Per-variant authoring overrides (Phase 1): bound text length + validate
+        // logo layout so malformed values can never reach the ASS renderer.
+        hookText: String(p?.hookText ?? "").slice(0, 120),
+        outroText: String(p?.outroText ?? "").slice(0, 120),
+        logoLayout: normLogoLayout(p?.logoLayout),
+        hookColor: ((s: any) => { const h = String(s ?? "").replace(/[^0-9a-fA-F]/g, "").slice(0, 6); return h.length === 6 ? h.toUpperCase() : undefined; })(p?.hookColor),
+      }));
+      const updates: any = {};
+      if (Array.isArray(rules)) updates.factoryDurationRules = rules;
+      if (Array.isArray(nvProfiles)) updates.factoryNvProfiles = normProfiles(nvProfiles);
+      if (Array.isArray(voProfiles)) updates.factoryVoProfiles = normProfiles(voProfiles);
+      if (typeof sheetTabNv === "string") updates.factorySheetTabNv = sheetTabNv.trim() || null;
+      if (typeof sheetTabVo === "string") updates.factorySheetTabVo = sheetTabVo.trim() || null;
+      const [g] = await db.select().from(globalSettings).limit(1);
+      if (g) await db.update(globalSettings).set(updates).where(eq(globalSettings.id, g.id));
+      else await db.insert(globalSettings).values(updates);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // "Automated Shorts Factory" — one source video → N unique shorts
+  // (mix of no-voiceover + voiceover) decided by duration rules + profiles.
+  // ───────────────────────────────────────────────────────────────────────
+  app.post(
+    "/api/automated-shorts-factory",
+    upload.fields(automatedShortsFields),
+    async (req, res) => {
+      try {
+        const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+
+        const bgMusicFile = files.bgMusic?.[0];
+        const bgMusicAssetId = parseIntStrict(req.body.bgMusicAssetId);
+        let bgMusicPath: string | undefined;
+        if (bgMusicFile) bgMusicPath = bgMusicFile.path;
+        else if (bgMusicAssetId !== null) {
+          const asset = await assetsStorage.getBgMusicAssetById(bgMusicAssetId);
+          if (asset) bgMusicPath = asset.filePath;
+        }
+
+        const logoFile = files.logo?.[0];
+        const logoAssetId = parseIntStrict(req.body.logoAssetId);
+        let logoPath: string | undefined;
+        if (logoFile) logoPath = logoFile.path;
+        else if (logoAssetId !== null) {
+          const asset = await assetsStorage.getLogoAssetById(logoAssetId);
+          if (asset) logoPath = asset.filePath;
+        }
+
+        const tabsJson = req.body.tabs as string;
+        if (!tabsJson) return res.status(400).json({ error: "tabs is required" });
+        let tabs: Array<{ projectName?: string; isVerticalSource?: boolean; cropType?: string; fullVideoUrl?: string }>;
+        try { tabs = JSON.parse(tabsJson); } catch { return res.status(400).json({ error: "tabs must be valid JSON" }); }
+        if (!Array.isArray(tabs) || tabs.length === 0) return res.status(400).json({ error: "At least one source is required" });
+        if (tabs.length > AUTOMATED_SHORTS_MAX_TABS) return res.status(400).json({ error: `Max ${AUTOMATED_SHORTS_MAX_TABS} sources per run` });
+
+        const targetSeconds = parseInt(String(req.body.targetSeconds || "30"), 10);
+        if (isNaN(targetSeconds) || targetSeconds < 8 || targetSeconds > 60) {
+          return res.status(400).json({ error: "targetSeconds must be between 8 and 60" });
+        }
+
+        const batches: string[] = [];
+        for (let i = 0; i < tabs.length; i++) {
+          const tab = tabs[i];
+          const fullFile = files[`fullVideo_${i}`]?.[0];
+          const fullVideoUrl = tab.fullVideoUrl?.trim() || undefined;
+          if (!fullVideoUrl && !fullFile) {
+            return res.status(400).json({ error: `Source ${i + 1}: a video URL or file is required` });
+          }
+          const { batchId } = await runFactory({
+            userId: req.user?.id || null,
+            fullVideoUrl,
+            fullVideoPath: fullFile?.path,
+            bgMusicPath: bgMusicPath || null,
+            logoPath: logoPath || null,
+            projectName: tab.projectName?.trim() || `Factory ${i + 1}`,
+            targetSeconds,
+            isVerticalSource: !!tab.isVerticalSource,
+            cropType: tab.cropType || "none",
+          });
+          batches.push(batchId);
+        }
+
+        res.status(201).json({ batches });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message || "Factory failed" });
+      }
+    }
+  );
+
+  // ── Plan → Edit → Generate ────────────────────────────────────────────────
+  // POST /api/factory/plan downloads + probes each source and returns the
+  // editable list of variant slots (WITHOUT creating projects). The resolved
+  // plan (with file paths) is held server-side; the client edits the variant
+  // profiles and POSTs them back to /api/factory/generate.
+  const VALID_MOODS = new Set(["auto", "epic", "emotional", "uplifting", "dramatic", "energetic", "happy", "chill", "dark", "none"]);
+  const VALID_CAPTION = new Set(["capcut_green", "capcut_yellow", "neon_pop", "minimal_white", "fire", "gradient_glow"]);
+  const clamp01 = (n: any) => Math.max(0, Math.min(1, Number(n)));
+  const normLogoLayoutRun = (l: any) => {
+    if (!l || typeof l !== "object") return undefined;
+    const { xPct, yPct, widthPct, opacity } = l;
+    if (![xPct, yPct, widthPct, opacity].every((v) => typeof v === "number" && isFinite(v))) return undefined;
+    return { xPct: clamp01(xPct), yPct: clamp01(yPct), widthPct: clamp01(widthPct), opacity: clamp01(opacity) };
+  };
+  const sanitizeProfile = (p: any, fallback: VariantProfile): VariantProfile => ({
+    name: typeof p?.name === "string" ? p.name.slice(0, 60) : fallback.name,
+    captionStyle: VALID_CAPTION.has(p?.captionStyle) ? p.captionStyle : fallback.captionStyle,
+    mirror: typeof p?.mirror === "boolean" ? p.mirror : fallback.mirror,
+    noise: Math.max(0, Math.min(30, Number(p?.noise ?? fallback.noise) || 0)),
+    logoPosition: p?.logoPosition === "top-left" ? "top-left" : (p?.logoPosition === "top-right" ? "top-right" : fallback.logoPosition),
+    musicMood: typeof p?.musicMood === "string" && VALID_MOODS.has(p.musicMood) ? p.musicMood : fallback.musicMood,
+    topCard: typeof p?.topCard === "boolean" ? p.topCard : fallback.topCard,
+    outro: typeof p?.outro === "boolean" ? p.outro : fallback.outro,
+    hookText: String(p?.hookText ?? "").slice(0, 120) || undefined,
+    outroText: String(p?.outroText ?? "").slice(0, 120) || undefined,
+    logoLayout: normLogoLayoutRun(p?.logoLayout),
+    logoAssetId: (typeof p?.logoAssetId === "number" && Number.isInteger(p.logoAssetId) && p.logoAssetId > 0) ? p.logoAssetId : null,
+    hookColor: ((s: any) => { const h = String(s ?? "").replace(/[^0-9a-fA-F]/g, "").slice(0, 6); return h.length === 6 ? h.toUpperCase() : undefined; })(p?.hookColor),
+  });
+
+  app.post(
+    "/api/factory/plan",
+    upload.fields(automatedShortsFields),
+    async (req, res) => {
+      try {
+        const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+
+        const bgMusicFile = files.bgMusic?.[0];
+        const bgMusicAssetId = parseIntStrict(req.body.bgMusicAssetId);
+        let bgMusicPath: string | undefined;
+        if (bgMusicFile) bgMusicPath = bgMusicFile.path;
+        else if (bgMusicAssetId !== null) {
+          const asset = await assetsStorage.getBgMusicAssetById(bgMusicAssetId);
+          if (asset) bgMusicPath = asset.filePath;
+        }
+
+        const logoFile = files.logo?.[0];
+        const logoAssetId = parseIntStrict(req.body.logoAssetId);
+        let logoPath: string | undefined;
+        if (logoFile) logoPath = logoFile.path;
+        else if (logoAssetId !== null) {
+          const asset = await assetsStorage.getLogoAssetById(logoAssetId);
+          if (asset) logoPath = asset.filePath;
+        }
+
+        const tabsJson = req.body.tabs as string;
+        if (!tabsJson) return res.status(400).json({ error: "tabs is required" });
+        let tabs: Array<{ projectName?: string; isVerticalSource?: boolean; cropType?: string; fullVideoUrl?: string }>;
+        try { tabs = JSON.parse(tabsJson); } catch { return res.status(400).json({ error: "tabs must be valid JSON" }); }
+        if (!Array.isArray(tabs) || tabs.length === 0) return res.status(400).json({ error: "At least one source is required" });
+        if (tabs.length > AUTOMATED_SHORTS_MAX_TABS) return res.status(400).json({ error: `Max ${AUTOMATED_SHORTS_MAX_TABS} sources per run` });
+
+        const targetSeconds = parseInt(String(req.body.targetSeconds || "30"), 10);
+        if (isNaN(targetSeconds) || targetSeconds < 8 || targetSeconds > 60) {
+          return res.status(400).json({ error: "targetSeconds must be between 8 and 60" });
+        }
+
+        const plans: Array<{ batchId: string; baseName: string; durationSec: number; detectedMood: string; sharedTitle: string; targetSeconds: number; variants: FactoryVariantSlot[] }> = [];
+        for (let i = 0; i < tabs.length; i++) {
+          const tab = tabs[i];
+          const fullFile = files[`fullVideo_${i}`]?.[0];
+          const fullVideoUrl = tab.fullVideoUrl?.trim() || undefined;
+          if (!fullVideoUrl && !fullFile) {
+            return res.status(400).json({ error: `Source ${i + 1}: a video URL or file is required` });
+          }
+          const plan = await planFactory({
+            userId: req.user?.id || null,
+            fullVideoUrl,
+            fullVideoPath: fullFile?.path,
+            bgMusicPath: bgMusicPath || null,
+            logoPath: logoPath || null,
+            projectName: tab.projectName?.trim() || `Factory ${i + 1}`,
+            targetSeconds,
+            isVerticalSource: !!tab.isVerticalSource,
+            cropType: tab.cropType || "none",
+          });
+          storeFactoryPlan(plan);
+          // Return only what the editor needs (no server file paths leak out).
+          plans.push({
+            batchId: plan.batchId,
+            baseName: plan.baseName,
+            durationSec: plan.durationSec,
+            detectedMood: plan.detectedMood,
+            sharedTitle: plan.sharedTitle,
+            targetSeconds: plan.targetSeconds,
+            variants: plan.variants,
+          });
+        }
+
+        res.status(200).json({ plans });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message || "Factory plan failed" });
+      }
+    }
+  );
+
+  // POST /api/factory/generate — body { plans: [{ batchId, variants:[{kind,index,profile}] }] }.
+  // Looks up each stored plan, applies the edited (sanitized) variants, and runs.
+  app.post("/api/factory/generate", express.json(), async (req, res) => {
+    try {
+      const incoming = Array.isArray(req.body?.plans) ? req.body.plans : [];
+      if (!incoming.length) return res.status(400).json({ error: "plans is required" });
+
+      const batches: string[] = [];
+      const stale: string[] = [];
+      for (const item of incoming) {
+        const batchId = String(item?.batchId || "");
+        const plan = getFactoryPlan(batchId);
+        if (!plan) { stale.push(batchId); continue; }
+
+        const rawVariants = Array.isArray(item?.variants) ? item.variants.slice(0, 16) : [];
+        const planByKey = new Map(plan.variants.map((v) => [`${v.kind}:${v.index}`, v]));
+        const edited: FactoryVariantSlot[] = rawVariants
+          .filter((v: any) => v?.kind === "nv" || v?.kind === "vo")
+          .map((v: any) => {
+            const kind = v.kind as "nv" | "vo";
+            const index = Number(v.index) || 1;
+            const fallback = planByKey.get(`${kind}:${index}`)?.profile || plan.variants[0]?.profile;
+            return { kind, index, profile: sanitizeProfile(v.profile, fallback) };
+          });
+
+        const { batchId: started } = generateFromPlan(plan, edited.length ? edited : undefined);
+        factoryPlanStore.delete(batchId); // consumed
+        batches.push(started);
+      }
+
+      if (!batches.length && stale.length) {
+        return res.status(410).json({ error: "Plan expired — please Build plan again.", stale });
+      }
+      res.status(201).json({ batches, stale });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Factory generate failed" });
+    }
+  });
 
   app.post(
     "/api/projects/upload",
@@ -1066,7 +1758,9 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      if (project.projectType !== PROJECT_TYPES.AUTOMATED) {
+      const isAutomated = project.projectType === PROJECT_TYPES.AUTOMATED;
+      const isAutomatedNV = project.projectType === PROJECT_TYPES.AUTOMATED_NO_VOICEOVER;
+      if (!isAutomated && !isAutomatedNV) {
         return res.status(400).json({
           error: "Retry is only supported for Automated Shorts projects",
         });
@@ -1104,11 +1798,13 @@ export async function registerRoutes(
         captionStyle: project.captionStyle || "capcut_green",
       };
 
-      const { runAutomatedShortBackgroundForExisting } = await import(
-        "./automated-shorts/orchestrator"
-      );
+      // Route to the matching orchestrator variant so the retried project keeps
+      // its original type/behaviour.
+      const runForExisting = isAutomatedNV
+        ? (await import("./automated-shorts/orchestrator-no-voiceover")).runAutomatedShortBackgroundForExistingNV
+        : (await import("./automated-shorts/orchestrator")).runAutomatedShortBackgroundForExisting;
       // Detached: respond immediately, run pipeline asynchronously.
-      runAutomatedShortBackgroundForExisting(id, opts).catch(async (err) => {
+      runForExisting(id, opts).catch(async (err) => {
         console.error(`[Project ${id}] retry failed:`, err);
         await storage.updateProject(id, {
           status: "failed",

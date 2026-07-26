@@ -144,6 +144,7 @@ export default function Home() {
 
   const { data: projects = [], isLoading } = useQuery<Project[]>({
     queryKey: ["/api/projects"],
+    refetchInterval: 3000,
   });
   const { data: bgMusicAssets = [], refetch: refetchBgMusic } = useQuery<BgMusicAsset[]>({
     queryKey: ["/api/assets/bg-music"],

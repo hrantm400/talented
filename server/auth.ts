@@ -468,6 +468,7 @@ function sanitizeUser(user: AuthUser) {
     hasGoogleSheets: !!user.googleSheetId && !!user.googleServiceAccountJson,
     personalModelScript: user.personalModelScript,
     personalModelVideo: user.personalModelVideo,
+    personalModelSegments: user.personalModelSegments,
     personalModelWhisper: user.personalModelWhisper,
   };
   

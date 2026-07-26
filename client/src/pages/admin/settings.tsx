@@ -1,8 +1,11 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { Shield, Key, Save, Bot, CheckCircle2, BrainCircuit, ShieldAlert, Eye, EyeOff, Loader2, RefreshCw, DollarSign } from "lucide-react";
+import { Shield, Key, Save, Bot, CheckCircle2, BrainCircuit, ShieldAlert, Eye, EyeOff, Loader2, RefreshCw, DollarSign, Table2 } from "lucide-react";
 import { ModelSelector } from "@/components/model-selector";
 import { ApiKeyManager } from "@/components/api-key-manager";
+import { FactorySettings } from "@/components/factory-settings";
+import { MoodMusicLibrary } from "@/components/mood-music-library";
+import { CleanupSettingsCard } from "@/components/cleanup-settings";
 import { type ElevenLabsKey } from "@shared/schema";
 
 export default function AdminSettingsPage() {
@@ -12,7 +15,9 @@ export default function AdminSettingsPage() {
   const [openrouterKey, setOpenrouterKey] = useState("");
   const [defaultModelScript, setDefaultModelScript] = useState<string | null>(null);
   const [defaultModelVideo, setDefaultModelVideo] = useState<string | null>(null);
+  const [defaultModelSegments, setDefaultModelSegments] = useState<string | null>(null);
   const [defaultModelWhisper, setDefaultModelWhisper] = useState<string>("");
+  const [jamendoClientId, setJamendoClientId] = useState<string>("");
   const [mullvadEnabled, setMullvadEnabled] = useState(false);
   const [mullvadPrivateKey, setMullvadPrivateKey] = useState("");
   const [mullvadAddress, setMullvadAddress] = useState("");
@@ -20,6 +25,11 @@ export default function AdminSettingsPage() {
   const [showOpenrouterKey, setShowOpenrouterKey] = useState(false);
   const [showMullvadKey, setShowMullvadKey] = useState(false);
   const [telegramChatId, setTelegramChatId] = useState("");
+  // Personal (admin's own user row) — Google Sheets + Telegram notifications.
+  const [googleSheetId, setGoogleSheetId] = useState("");
+  const [googleServiceJson, setGoogleServiceJson] = useState("");
+  const [userTgChatId, setUserTgChatId] = useState("");
+  const [userTgEnabled, setUserTgEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [apiUsage, setApiUsage] = useState<any>(null);
@@ -42,13 +52,26 @@ export default function AdminSettingsPage() {
         setElevenlabsKeys(data.elevenlabsKeys || []);
         setDefaultModelScript(data.defaultModelScript || null);
         setDefaultModelVideo(data.defaultModelVideo || null);
+        setDefaultModelSegments(data.defaultModelSegments || null);
         setDefaultModelWhisper(data.defaultModelWhisper || "");
+        setJamendoClientId(data.jamendoClientId || "");
         setTelegramChatId(data.telegramAdminChatId || "");
         setMullvadEnabled(data.mullvadEnabled || false);
         setMullvadPrivateKey(data.mullvadPrivateKey || "");
         setMullvadAddress(data.mullvadAddress || "");
         setMullvadCountry(data.mullvadCountry || "Sweden");
       });
+    // Personal sections (admin's own user row).
+    fetch("/api/auth/me", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.user) {
+          setGoogleSheetId(data.user.googleSheetId || "");
+          setUserTgChatId(data.user.telegramChatId || "");
+          setUserTgEnabled(data.user.telegramNotificationsEnabled || false);
+        }
+      })
+      .catch(() => {});
     fetchUsage();
   }, []);
 
@@ -61,7 +84,9 @@ export default function AdminSettingsPage() {
       telegramAdminChatId: telegramChatId,
       defaultModelScript,
       defaultModelVideo,
+      defaultModelSegments,
       defaultModelWhisper: defaultModelWhisper.trim() || null,
+      jamendoClientId: jamendoClientId.trim() || null,
       elevenlabsKeys,
       mullvadEnabled,
       mullvadCountry,
@@ -76,11 +101,27 @@ export default function AdminSettingsPage() {
       body: JSON.stringify(body),
       credentials: "include",
     });
+
+    // Also save the personal (admin user row) sections: keys, Google Sheets, Telegram.
+    const userBody: any = {
+      googleSheetId: googleSheetId || null,
+      telegramChatId: userTgChatId || null,
+      telegramNotificationsEnabled: userTgEnabled,
+    };
+    if (googleServiceJson) userBody.googleServiceAccountJson = googleServiceJson;
+    await fetch("/api/user/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(userBody),
+      credentials: "include",
+    }).catch(() => {});
+
     setSaving(false);
     if (res.ok) {
+      setGoogleServiceJson("");
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
-      // Refresh settings
+      // Refresh global settings (single source of keys).
       const newSettings = await fetch("/api/admin/settings", { credentials: "include" }).then(r => r.json());
       setSettings(newSettings);
       setElevenlabsKeys(newSettings.elevenlabsKeys || []);
@@ -198,20 +239,19 @@ export default function AdminSettingsPage() {
         )}
       </div>
 
-      {/* ElevenLabs */}
+      {/* ElevenLabs keys */}
       <div className="bg-card border border-border rounded-xl p-6 space-y-4">
         <div className="flex items-center gap-2 mb-2">
           <Key className="w-4 h-4 text-primary" />
-          <h3 className="font-semibold">ElevenLabs (Global)</h3>
+          <h3 className="font-semibold">ElevenLabs Keys</h3>
         </div>
         <p className="text-xs text-muted-foreground mb-4">
-          These keys are used by users who have "Use admin ElevenLabs key" enabled.
-          The active key will be used for generation.
+          Your ElevenLabs API keys — each with a name. The active key is used for voiceover generation.
         </p>
-        
-        <ApiKeyManager 
-          keys={elevenlabsKeys} 
-          onChange={setElevenlabsKeys} 
+
+        <ApiKeyManager
+          keys={elevenlabsKeys}
+          onChange={setElevenlabsKeys}
         />
       </div>
 
@@ -219,13 +259,13 @@ export default function AdminSettingsPage() {
       <div className="bg-card border border-border rounded-xl p-6 space-y-4">
         <div className="flex items-center gap-2">
           <Key className="w-4 h-4 text-violet-500" />
-          <h3 className="font-semibold">OpenRouter (Global)</h3>
+          <h3 className="font-semibold">OpenRouter Key</h3>
           {settings?.hasOpenrouterKey && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-500">Configured</span>
           )}
         </div>
         <p className="text-xs text-muted-foreground">
-          Used for AI voiceover script generation. Users with "Use admin OpenRouter key" will use this.
+          Used for AI video analysis, segments, scripts and music mood.
         </p>
         <div className="relative">
           <input
@@ -272,6 +312,16 @@ export default function AdminSettingsPage() {
         </div>
 
         <div className="pt-4 border-t border-white/5">
+          <ModelSelector
+            label="Segments — No Voiceover (setup + epic)"
+            description="Model that picks the 2 best moments. Use a stronger model here (e.g. Gemini 2.5 Pro) while keeping the cheaper Video model for mood/title. Leave empty to reuse the Video model. MUST support Vision."
+            value={defaultModelSegments}
+            onChange={setDefaultModelSegments}
+            requireVision
+          />
+        </div>
+
+        <div className="pt-4 border-t border-white/5">
           <label className="block text-[0.95rem] font-semibold text-foreground mb-1">
             Whisper Transcription Model
           </label>
@@ -288,7 +338,27 @@ export default function AdminSettingsPage() {
             className="w-full px-4 py-3 bg-card border border-border rounded-lg text-foreground focus:outline-none focus:ring-1 focus:ring-primary shadow-sm"
           />
         </div>
+
+        <div className="pt-4 border-t border-white/5">
+          <label className="block text-[0.95rem] font-semibold text-foreground mb-1">
+            Jamendo Client ID (auto background music)
+          </label>
+          <p className="text-[0.85rem] text-muted-foreground mb-2">
+            Free music for the "🎵 Auto music" option. Get a client_id at <code className="bg-muted px-1 rounded">devportal.jamendo.com</code>. Only commercial-safe CC-BY tracks are used; attribution is generated automatically.
+          </p>
+          <input
+            type="text"
+            value={jamendoClientId}
+            onChange={(e) => setJamendoClientId(e.target.value)}
+            placeholder="e.g. 242313e2"
+            className="w-full px-4 py-3 bg-card border border-border rounded-lg text-foreground focus:outline-none focus:ring-1 focus:ring-primary shadow-sm"
+          />
+        </div>
       </div>
+
+      <FactorySettings />
+
+      <MoodMusicLibrary />
 
       {/* Mullvad VPN */}
       <div className="bg-card border border-border rounded-xl p-6 space-y-4">
@@ -387,6 +457,51 @@ export default function AdminSettingsPage() {
         />
       </div>
 
+      {/* Google Sheets (logged automated/factory videos) */}
+      <div className="bg-card border border-border rounded-xl p-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <Table2 className="w-4 h-4 text-green-500" />
+          <h3 className="font-semibold">Google Sheets</h3>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Completed automated/factory videos are logged to this Google Sheet (factory uses separate tabs for NV / VO).
+        </p>
+        <input
+          placeholder="Google Sheet ID"
+          value={googleSheetId}
+          onChange={(e) => setGoogleSheetId(e.target.value)}
+          className="w-full px-3 py-2 bg-muted/50 border border-border rounded-lg text-sm"
+        />
+        <textarea
+          placeholder="Google Service Account JSON (paste the entire JSON here)"
+          value={googleServiceJson}
+          onChange={(e) => setGoogleServiceJson(e.target.value)}
+          className="w-full px-3 py-2 bg-muted/50 border border-border rounded-lg text-sm h-24 font-mono"
+        />
+      </div>
+
+      {/* Telegram notifications (video ready) */}
+      <div className="bg-card border border-border rounded-xl p-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <Bot className="w-4 h-4 text-blue-500" />
+          <h3 className="font-semibold">Telegram — Video Ready Notifications</h3>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Send <code>/start</code> to{" "}
+          <a href="https://t.me/Reelforgespace_bot" target="_blank" className="text-primary hover:underline">@Reelforgespace_bot</a> to get your Chat ID.
+        </p>
+        <input
+          placeholder="Your Telegram Chat ID"
+          value={userTgChatId}
+          onChange={(e) => setUserTgChatId(e.target.value)}
+          className="w-full px-3 py-2 bg-muted/50 border border-border rounded-lg text-sm"
+        />
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked={userTgEnabled} onChange={(e) => setUserTgEnabled(e.target.checked)} className="rounded" />
+          <span className="text-sm">Notify me when videos are ready</span>
+        </label>
+      </div>
+
       <button
         onClick={handleSave}
         disabled={saving}
@@ -395,6 +510,12 @@ export default function AdminSettingsPage() {
         <Save className="w-4 h-4" />
         {saving ? "Saving..." : "Save Settings"}
       </button>
+
+      {/* Storage cleanup */}
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Storage</h2>
+        <CleanupSettingsCard />
+      </section>
     </div>
   );
 }

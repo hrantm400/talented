@@ -11,9 +11,7 @@ import {
   Sparkles,
   Rocket,
   Download,
-  Shield,
   LogOut,
-  Users,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
@@ -28,6 +26,8 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Auto-Shorts (Classic)", icon: Film, description: "Convert 16:9 to 9:16 Sandwich", feature: "classic" },
   { href: "/automated-shorts", label: "Automated Shorts", icon: Rocket, description: "Full+short tabs, auto script+voiceover", feature: "automated-shorts" },
+  { href: "/automated-shorts-no-voiceover", label: "Automated Shorts No Voiceover", icon: Rocket, description: "Full+short tabs, no voiceover variant", feature: "automated-shorts-no-voiceover" },
+  { href: "/automated-shorts-factory", label: "Automated Shorts Factory", icon: Rocket, description: "1 video → many unique shorts (NV + VO)", feature: "automated-shorts-factory" },
   { href: "/elevenlabs", label: "ElevenLabs Voiceover", icon: Mic2, description: "Generate voiceovers from text", feature: "elevenlabs" },
   { href: "/download", label: "Download Video", icon: Download, description: "Fetch videos by URL (yt-dlp)", feature: "download" },
   { href: "/voiceover-script", label: "Viral Voiceover Script", icon: Sparkles, description: "AI script from short video (Gemini 3 Pro)", feature: "voiceover-script" },
@@ -35,21 +35,7 @@ const NAV_ITEMS: NavItem[] = [
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { user, hasFeature, isAdmin, logout } = useAuth();
-  const [pendingRequests, setPendingRequests] = useState(0);
-
-  // Fetch pending access requests for admin badge
-  useEffect(() => {
-    if (!isAdmin) return;
-    fetch("/api/admin/access-requests", { credentials: "include" })
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          setPendingRequests(data.filter((r: any) => r.status === "pending").length);
-        }
-      })
-      .catch(() => {});
-  }, [isAdmin]);
+  const { user, hasFeature, logout } = useAuth();
 
   const visibleNavItems = NAV_ITEMS.filter((item) => hasFeature(item.feature));
 
@@ -108,43 +94,11 @@ export function Sidebar() {
       </div>
 
       <div className="p-4 mt-auto space-y-1">
-        {/* Admin Panel */}
-        {isAdmin && (
-          <>
-            <Link
-              href="/admin/users"
-              className={`flex items-center gap-3 px-3 py-2 w-full rounded-xl transition-colors text-sm ${
-                location.startsWith("/admin/users")
-                  ? "bg-primary/10 text-primary font-medium"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              }`}
-            >
-              <Users className="w-4 h-4" />
-              Users
-              {pendingRequests > 0 && (
-                <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0">
-                  {pendingRequests}
-                </Badge>
-              )}
-            </Link>
-            <Link
-              href="/admin/settings"
-              className={`flex items-center gap-3 px-3 py-2 w-full rounded-xl transition-colors text-sm ${
-                location === "/admin/settings"
-                  ? "bg-primary/10 text-primary font-medium"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              }`}
-            >
-              <Shield className="w-4 h-4" />
-              Admin Settings
-            </Link>
-          </>
-        )}
-
+        {/* Single consolidated Settings (admin) */}
         <Link
-          href="/settings"
+          href="/admin/settings"
           className={`flex items-center gap-3 px-3 py-2 w-full rounded-xl transition-colors text-sm ${
-            location === "/settings"
+            location === "/admin/settings" || location === "/settings"
               ? "bg-primary/10 text-primary font-medium"
               : "text-muted-foreground hover:bg-muted hover:text-foreground"
           }`}

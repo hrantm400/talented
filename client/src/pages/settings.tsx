@@ -17,6 +17,7 @@ export default function SettingsPage() {
   const [googleServiceJson, setGoogleServiceJson] = useState("");
   const [personalModelScript, setPersonalModelScript] = useState<string | null>(null);
   const [personalModelVideo, setPersonalModelVideo] = useState<string | null>(null);
+  const [personalModelSegments, setPersonalModelSegments] = useState<string | null>(null);
   const [personalModelWhisper, setPersonalModelWhisper] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -32,6 +33,7 @@ export default function SettingsPage() {
           setGoogleSheetId(data.user.googleSheetId || "");
           setPersonalModelScript(data.user.personalModelScript || null);
           setPersonalModelVideo(data.user.personalModelVideo || null);
+          setPersonalModelSegments(data.user.personalModelSegments || null);
           setPersonalModelWhisper(data.user.personalModelWhisper || "");
           setElevenlabsKeys(data.user.elevenlabsKeys || []);
         }
@@ -47,6 +49,7 @@ export default function SettingsPage() {
       googleSheetId: googleSheetId || null,
       personalModelScript,
       personalModelVideo,
+      personalModelSegments,
       personalModelWhisper: personalModelWhisper.trim() || null,
       elevenlabsKeys,
     };
@@ -179,6 +182,15 @@ export default function SettingsPage() {
               label="Personal Video Analysis"
               value={personalModelVideo}
               onChange={setPersonalModelVideo}
+              requireVision
+            />
+          </div>
+
+          <div className="pt-2">
+            <ModelSelector
+              label="Personal Segments (No Voiceover)"
+              value={personalModelSegments}
+              onChange={setPersonalModelSegments}
               requireVision
             />
           </div>

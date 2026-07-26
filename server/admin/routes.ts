@@ -295,7 +295,9 @@ export function createAdminRouter(): Router {
           openrouterApiKey: null,
           defaultModelScript: null,
           defaultModelVideo: null,
+          defaultModelSegments: null,
           defaultModelWhisper: null,
+          jamendoClientId: null,
           telegramAdminChatId: null,
           elevenlabsKeys: [],
           mullvadEnabled: false,
@@ -340,7 +342,9 @@ export function createAdminRouter(): Router {
         openrouterApiKey,
         defaultModelScript,
         defaultModelVideo,
+        defaultModelSegments,
         defaultModelWhisper,
+        jamendoClientId,
         telegramAdminChatId,
       } = req.body as {
         elevenlabsApiKey?: string;
@@ -350,7 +354,9 @@ export function createAdminRouter(): Router {
         openrouterApiKey?: string;
         defaultModelScript?: string;
         defaultModelVideo?: string;
+        defaultModelSegments?: string;
         defaultModelWhisper?: string;
+        jamendoClientId?: string;
         telegramAdminChatId?: string;
       };
 
@@ -361,7 +367,9 @@ export function createAdminRouter(): Router {
       if (openrouterApiKey !== undefined) updates.openrouterApiKey = openrouterApiKey || null;
       if (defaultModelScript !== undefined) updates.defaultModelScript = defaultModelScript || null;
       if (defaultModelVideo !== undefined) updates.defaultModelVideo = defaultModelVideo || null;
+      if (defaultModelSegments !== undefined) updates.defaultModelSegments = defaultModelSegments || null;
       if (defaultModelWhisper !== undefined) updates.defaultModelWhisper = defaultModelWhisper || null;
+      if (jamendoClientId !== undefined) updates.jamendoClientId = jamendoClientId || null;
       if (telegramAdminChatId !== undefined) updates.telegramAdminChatId = telegramAdminChatId || null;
       
       if (req.body.mullvadEnabled !== undefined) updates.mullvadEnabled = req.body.mullvadEnabled;

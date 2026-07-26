@@ -47,6 +47,59 @@ export interface ElevenLabsKey {
   isActive: boolean;
 }
 
+/**
+ * Visual logo placement on the 1080×1920 canvas, stored as fractions so it is
+ * resolution-independent. xPct/yPct = top-left of the logo; widthPct = logo
+ * width; opacity 0..1.
+ */
+export interface LogoLayout {
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  opacity: number;
+}
+
+// ─── Automated Shorts Factory ───
+// One source video → several unique shorts (mix of no-voiceover + voiceover)
+// based on duration rules, each styled by a variant profile.
+
+/** How many NV / VO videos to make for sources up to maxMin minutes long. */
+export interface FactoryDurationRule {
+  maxMin: number; // upper bound (inclusive) in minutes; rules are ascending
+  nv: number;     // number of no-voiceover variants
+  vo: number;     // number of voiceover variants
+}
+
+/** A reusable "recipe" the factory assigns to each generated short. */
+export interface VariantProfile {
+  name?: string;
+  captionStyle: string;                       // one of the 6 preset ids
+  mirror: boolean;                            // horizontal flip
+  noise: number;                              // 0 = off, else strength (~4-12)
+  logoPosition: "top-left" | "top-right";     // logo corner
+  musicMood: string;                          // "auto" | mood tag | "none"
+  topCard: boolean;                           // animated headline card on top
+  outro: boolean;                             // animated "full video in comments"
+  hookText?: string;                          // custom top-card text; blank ⇒ AI title
+  outroText?: string;                         // custom outro text; blank ⇒ default
+  logoLayout?: LogoLayout;                    // per-variant logo placement/scale/opacity
+  logoAssetId?: number | null;                // per-variant logo IMAGE (saved logo asset); null ⇒ run default
+  hookColor?: string;                         // headline text color, RGB hex (e.g. "A020F0"); blank ⇒ default purple
+}
+
+/** Per-project rendering config the factory writes onto each output. */
+export interface VariantConfig {
+  mirror: boolean;
+  noise: number;
+  topCard: boolean;
+  outro: boolean;
+  hookText?: string;                          // custom top-card text override
+  outroText?: string;                         // custom outro text override
+  logoLayout?: LogoLayout;                    // overrides project.logoLayout at render
+  logoPosition?: "top-left" | "top-right";    // legacy-corner override
+  hookColor?: string;                         // headline text color (RGB hex)
+}
+
 // ─── Users ───
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -69,6 +122,10 @@ export const users = pgTable("users", {
   personalModelScript: text("personal_model_script"),
   personalModelVideo: text("personal_model_video"),
   personalModelWhisper: text("personal_model_whisper"),
+  // Model for the No-Voiceover SEGMENTS task (setup+epic curation). Lets you
+  // run a stronger model here while keeping the cheaper video model for
+  // mood/title. Falls back to the video model when unset.
+  personalModelSegments: text("personal_model_segments"),
   useAdminElevenlabs: boolean("use_admin_elevenlabs").notNull().default(false),
   useAdminOpenrouter: boolean("use_admin_openrouter").notNull().default(false),
 
@@ -123,6 +180,23 @@ export const globalSettings = pgTable("global_settings", {
   defaultModelScript: text("default_model_script"),
   defaultModelVideo: text("default_model_video"),
   defaultModelWhisper: text("default_model_whisper"),
+  defaultModelSegments: text("default_model_segments"),
+  jamendoClientId: text("jamendo_client_id"),
+  // Visual logo placement defaults (No-Voiceover variant). Each layout is
+  // { xPct, yPct, widthPct, opacity } relative to the 1080×1920 canvas.
+  // Take 1 / Take 2 let a 2x pair put the logo in two different spots.
+  logoLayoutTake1: jsonb("logo_layout_take1").$type<LogoLayout>(),
+  logoLayoutTake2: jsonb("logo_layout_take2").$type<LogoLayout>(),
+  // ── Automated Shorts Factory config ──
+  factoryDurationRules: jsonb("factory_duration_rules").$type<FactoryDurationRule[]>(),
+  factoryNvProfiles: jsonb("factory_nv_profiles").$type<VariantProfile[]>(),
+  factoryVoProfiles: jsonb("factory_vo_profiles").$type<VariantProfile[]>(),
+  factorySheetTabNv: text("factory_sheet_tab_nv"),
+  factorySheetTabVo: text("factory_sheet_tab_vo"),
+  // Saved default logo placement for the Factory bulk-logo bar (drag editor).
+  factoryDefaultLogoLayout: jsonb("factory_default_logo_layout").$type<LogoLayout>(),
+  // Monotonic counter: the last SOURCE number assigned for Google-Sheets ordering.
+  factoryLastSourceNumber: integer("factory_last_source_number").default(0),
   telegramAdminChatId: text("telegram_admin_chat_id"),
   
   // Mullvad VPN 
@@ -140,6 +214,8 @@ export type GlobalSettings = typeof globalSettings.$inferSelect;
 export const ALL_FEATURES = [
   "classic",
   "automated-shorts",
+  "automated-shorts-no-voiceover",
+  "automated-shorts-factory",
   "elevenlabs",
   "download",
   "voiceover-script",
@@ -151,6 +227,7 @@ export type FeatureKey = (typeof ALL_FEATURES)[number];
 export const PROJECT_TYPES = {
   CLASSIC: "classic",
   AUTOMATED: "automated",
+  AUTOMATED_NO_VOICEOVER: "automated-no-voiceover",
 } as const;
 
 export type ProjectType = (typeof PROJECT_TYPES)[keyof typeof PROJECT_TYPES];
@@ -186,6 +263,23 @@ export const projects = pgTable("projects", {
   // Logo overlay corner. Default top-right matches the historical position.
   // Bulk Paste's 2x feature lets the user pick "top-left" for Take 2.
   logoPosition: text("logo_position").default("top-right"),
+  // When auto-music (Jamendo) is used, the ready-to-paste credit line for the
+  // post description, e.g. "🎵 Music: X by Y (CC BY) — Jamendo: <url>".
+  musicAttribution: text("music_attribution"),
+  // Resolved visual logo placement for THIS project (from the global Take 1 /
+  // Take 2 defaults). Null = use the legacy corner placement.
+  logoLayout: jsonb("logo_layout").$type<LogoLayout>(),
+  // AI-generated viral headline shown as the animated top card (No-Voiceover).
+  hookTitle: text("hook_title"),
+  // Per-variant rendering config written by the factory (mirror/noise/cards).
+  variantConfig: jsonb("variant_config").$type<VariantConfig>(),
+  // Groups all outputs of one factory run (source video) together.
+  batchId: text("batch_id"),
+  // Google-Sheets ordering: sequential number of the SOURCE this output came
+  // from (same for all its variants), and the variant label ("voiceover 1" /
+  // "no voiceover 2"). Used to keep the sheet sorted instead of append-order.
+  sheetSourceNumber: integer("sheet_source_number"),
+  sheetVariantLabel: text("sheet_variant_label"),
 });
 
 export const insertProjectSchema = createInsertSchema(projects).omit({
@@ -201,6 +295,9 @@ export const bgMusicAssets = pgTable("bg_music_assets", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   filePath: text("file_path").notNull(),
+  // Mood tag (one of MOOD_TAGS) used for AI-mood-matched auto music in the
+  // Factory. null = untagged ("any") — eligible as a fallback for any mood.
+  mood: text("mood"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

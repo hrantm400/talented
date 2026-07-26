@@ -22,6 +22,7 @@ type AuthUser = {
   elevenlabsKeys?: ElevenLabsKey[];
   personalModelScript?: string | null;
   personalModelVideo?: string | null;
+  personalModelSegments?: string | null;
   personalModelWhisper?: string | null;
 };
 

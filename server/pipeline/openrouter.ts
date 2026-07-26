@@ -34,11 +34,20 @@ async function openRouterChatOnce(
   messages: OpenRouterMessage[],
   apiKey: string,
   max_tokens: number,
-  timeoutMs: number
+  timeoutMs: number,
+  reasoning?: Record<string, unknown>
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const body: Record<string, unknown> = { model, messages, max_tokens };
+    // For reasoning models (Gemini 2.5 Pro, etc.) the "thinking" tokens are
+    // emitted as part of the completion and eat into max_tokens. Left
+    // unbounded they consume the whole budget and the actual JSON answer gets
+    // truncated ("Gemini did not return JSON segments"). We (a) keep the
+    // reasoning OUT of the returned content (exclude) and (b) cap/minimise it
+    // so the structured answer always has room.
+    if (reasoning) body.reasoning = reasoning;
     const res = await fetch(OPENROUTER_URL, {
       method: "POST",
       headers: {
@@ -46,7 +55,7 @@ async function openRouterChatOnce(
         "Content-Type": "application/json",
         "HTTP-Referer": process.env.APP_URL || process.env.APP_PUBLIC_URL || "https://localhost:5000",
       },
-      body: JSON.stringify({ model, messages, max_tokens }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
 
@@ -103,17 +112,32 @@ async function openRouterChatOnce(
 export async function openRouterChat(
   model: string,
   messages: OpenRouterMessage[],
-  options: { max_tokens?: number; timeout_ms?: number; userId?: number | null } = {}
+  options: {
+    max_tokens?: number;
+    timeout_ms?: number;
+    userId?: number | null;
+    /**
+     * Reasoning control for thinking-capable models. Defaults to a low,
+     * excluded-from-output reasoning pass so structured JSON tasks don't get
+     * their answer truncated by runaway thinking tokens. Pass `null` to send
+     * no reasoning field at all (e.g. for plain text generation).
+     */
+    reasoning?: Record<string, unknown> | null;
+  } = {}
 ): Promise<string> {
   const apiKey = await getOpenRouterKey(options.userId);
   const timeoutMs = options.timeout_ms ?? 120_000;
   const max_tokens = options.max_tokens ?? 8192;
+  const reasoning =
+    options.reasoning === null
+      ? undefined
+      : options.reasoning ?? { effort: "low", exclude: true };
 
   const MAX_ATTEMPTS = 3;
   let lastErr: any;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await openRouterChatOnce(model, messages, apiKey, max_tokens, timeoutMs);
+      return await openRouterChatOnce(model, messages, apiKey, max_tokens, timeoutMs, reasoning);
     } catch (err: any) {
       lastErr = err;
       const status: number | undefined = err?.httpStatus;

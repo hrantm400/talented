@@ -110,6 +110,23 @@ function getCookiesPath(): string | undefined {
     console.warn(`[yt-dlp] Cookies file not found: ${cookiesFile}`);
     return undefined;
   }
+  // yt-dlp hard-errors on an empty or non-Netscape cookies file
+  // ("does not look like a Netscape format cookies file"), which aborts the
+  // ENTIRE download. Treat an unusable file as "no cookies" so public videos
+  // still download instead of every download failing outright.
+  try {
+    const trimmed = fs.readFileSync(cookiesFile, "utf8").trim();
+    const looksNetscape =
+      /^#\s*(Netscape|HTTP) /i.test(trimmed) ||
+      trimmed.split("\n").some((l) => !l.startsWith("#") && l.split("\t").length >= 6);
+    if (!trimmed || !looksNetscape) {
+      console.warn(`[yt-dlp] Cookies file ${cookiesFile} is empty/invalid — ignoring it (downloading without cookies).`);
+      return undefined;
+    }
+  } catch {
+    console.warn(`[yt-dlp] Could not read cookies file ${cookiesFile} — ignoring it.`);
+    return undefined;
+  }
   return cookiesFile;
 }
 
@@ -231,6 +248,31 @@ export async function listFormats(url: string): Promise<NormalizedFormat[]> {
       .sort((a, b) => (b.height || 0) - (a.height || 0));
 
     return normalized;
+  });
+}
+
+/**
+ * Fetch ONLY the video's duration (seconds) from yt-dlp metadata — NO download.
+ * Fast (a few seconds), used so the Factory "Build plan" step can decide how
+ * many variants to make without downloading the whole (possibly 17-min) video.
+ * Returns null if it can't be determined.
+ */
+export async function getRemoteDuration(url: string): Promise<number | null> {
+  if (!url.trim()) return null;
+  return enqueueDownload(async () => {
+    console.log(`[yt-dlp queue] getRemoteDuration: ${url}`);
+    try {
+      const result = (await ytDlpWithSSLFallback(url, {
+        ...commonYtDlpOptions(),
+        dumpSingleJson: true,
+        skipDownload: true,
+      })) as any;
+      const dur = Number(result?.duration);
+      return isFinite(dur) && dur > 0 ? dur : null;
+    } catch (e: any) {
+      console.warn(`[yt-dlp] getRemoteDuration failed: ${e?.message || e}`);
+      return null;
+    }
   });
 }
 

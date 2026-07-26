@@ -1,10 +1,12 @@
 import { storage } from "../storage";
-import { transcribeAudio, curateVideoSegments, findHookMoment } from "./gemini";
+import { transcribeAudio, curateVideoSegments, findHookMoment, generateHookTitle } from "./gemini";
 import {
   mixAudio,
   extractVideoSegments,
   createSandwichVideo,
   generateASS,
+  appendTopHookToAss,
+  appendOutroToAss,
   getMediaDuration,
   extractHookSegment,
   mixAudioWithHook,
@@ -14,7 +16,7 @@ import fs from "fs";
 import { broadcastProjectUpdate } from "../websocket";
 import { appendVideoRow } from "../google-sheets/append";
 import { PROJECT_TYPES } from "@shared/schema";
-import pLimit from "p-limit";
+import { renderPipelineLimit } from "./render-limit";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
@@ -56,7 +58,11 @@ async function updateProject(
       }).catch(() => {});
     }
 
-    if (step === "complete" && updatedProject.projectType === PROJECT_TYPES.AUTOMATED) {
+    if (
+      step === "complete" &&
+      (updatedProject.projectType === PROJECT_TYPES.AUTOMATED ||
+        updatedProject.projectType === PROJECT_TYPES.AUTOMATED_NO_VOICEOVER)
+    ) {
       const baseUrl = process.env.APP_PUBLIC_URL || process.env.BASE_URL || "";
       if (baseUrl) {
         if (updatedProject.userId) {
@@ -79,8 +85,9 @@ async function updateProject(
   }
 }
 
-// Restrict concurrent heavy FFmpeg pipelines to prevent CPU/RAM exhaustion
-const pipelineLimit = pLimit(2);
+// Restrict concurrent heavy FFmpeg pipelines to prevent CPU/RAM exhaustion.
+// Shared with the no-voiceover pipeline so the two never oversubscribe the box.
+const pipelineLimit = renderPipelineLimit;
 
 export function queuePipeline(projectId: number) {
   pipelineLimit(() => runPipeline(projectId)).catch((err) => {
@@ -177,17 +184,26 @@ export async function runPipeline(projectId: number): Promise<void> {
       }
 
       if (hookTimecode) {
-        await updateProject(projectId, "video_curation", 28);
-        hookSegmentPath = path.join(projectDir, "hook_segment.mp4");
-        const extractHookStart = Date.now();
-        await extractHookSegment(
-          project.sourceVideoPath!,
-          hookTimecode.start,
-          hookTimecode.end,
-          hookSegmentPath
-        );
-        hookDuration = await getMediaDuration(hookSegmentPath);
-        console.log(`[pipeline] Hook extraction took ${((Date.now() - extractHookStart)/1000).toFixed(1)}s`);
+        // A bad hook timecode (out of range / inverted) must NOT fail the whole
+        // project — the hook is an optional intro. Try it; on any error, skip it
+        // and continue without the hook.
+        try {
+          await updateProject(projectId, "video_curation", 28);
+          hookSegmentPath = path.join(projectDir, "hook_segment.mp4");
+          const extractHookStart = Date.now();
+          await extractHookSegment(
+            project.sourceVideoPath!,
+            hookTimecode.start,
+            hookTimecode.end,
+            hookSegmentPath
+          );
+          hookDuration = await getMediaDuration(hookSegmentPath);
+          console.log(`[pipeline] Hook extraction took ${((Date.now() - extractHookStart)/1000).toFixed(1)}s`);
+        } catch (err: any) {
+          console.warn(`[pipeline] Hook skipped (${err.message}) — continuing without it`);
+          hookSegmentPath = undefined;
+          hookDuration = 0;
+        }
       }
     }
 
@@ -195,11 +211,21 @@ export async function runPipeline(projectId: number): Promise<void> {
 
     // ── Step 2: video curation (skip if already saved) ──
     const existingTimecodes = (project.timecodes as Array<{ start: string; end: string }> | null) || null;
+    // Sanity-check saved timecodes: a past bug could leave absurdly long lists
+    // (the AI returned giant ranges that got split into 100+ chunks → an
+    // 8-minute concat that ffmpeg gets killed on). If they're way too long,
+    // ignore and re-curate cleanly instead of resuming into the same failure.
+    const tcSec = (t: string) => { const a = String(t).split(":").map(Number); return a.length === 3 ? a[0] * 3600 + a[1] * 60 + a[2] : a.length === 2 ? a[0] * 60 + a[1] : Number(t) || 0; };
+    const existingTotal = existingTimecodes ? existingTimecodes.reduce((acc, s) => acc + Math.max(0, tcSec(s.end) - tcSec(s.start)), 0) : 0;
+    const existingOk = !!existingTimecodes && existingTimecodes.length > 0 && existingTimecodes.length <= 40 && existingTotal <= voiceoverDuration + 20;
     let timecodes: Array<{ start: string; end: string }>;
-    if (existingTimecodes && existingTimecodes.length > 0) {
-      console.log(`[pipeline] Resume: reusing existing timecodes (${existingTimecodes.length} segments)`);
-      timecodes = existingTimecodes;
+    if (existingOk) {
+      console.log(`[pipeline] Resume: reusing existing timecodes (${existingTimecodes!.length} segments, ${existingTotal.toFixed(0)}s)`);
+      timecodes = existingTimecodes!;
     } else {
+      if (existingTimecodes && existingTimecodes.length > 0) {
+        console.warn(`[pipeline] Ignoring bad saved timecodes (${existingTimecodes.length} segments, ${existingTotal.toFixed(0)}s — too long) → re-curating`);
+      }
       const curationStart = Date.now();
       timecodes = await curateVideoSegments(
         project.aiAnalysisVideoPath || project.sourceVideoPath!,
@@ -236,7 +262,9 @@ export async function runPipeline(projectId: number): Promise<void> {
           project.voiceoverPath!,
           project.bgMusicPath!,
           mixedAudioPath,
-          voiceoverDuration
+          voiceoverDuration,
+          10,    // voVolumeDb — boost the TTS so it stays dominant
+          -20,   // bgVolumeDb — keep the music quiet, under the voiceover
         );
       }
       console.log(`[pipeline] Audio mixing took ${((Date.now() - mixingStart)/1000).toFixed(1)}s`);
@@ -281,6 +309,21 @@ export async function runPipeline(projectId: number): Promise<void> {
       assContent = generateASS(transcription.words, captionStyleId);
     }
 
+    const totalDuration = hookDuration + voiceoverDuration;
+
+    // Factory VO variants carry a variantConfig → give them the same polish as
+    // the No-Voiceover shorts: animated top card + outro + mirror/noise. Regular
+    // Automated Shorts have no variantConfig → behaviour is unchanged.
+    const vc = (project.variantConfig as any) || null;
+    if (vc) {
+      let title = vc.hookText?.trim() || project.hookTitle || "";
+      if (vc.topCard && !title) {
+        try { title = await generateHookTitle(project.aiAnalysisVideoPath || project.sourceVideoPath!, project.userId); } catch {}
+      }
+      if (vc.topCard && title) assContent = appendTopHookToAss(assContent, title, totalDuration, vc.hookColor);
+      if (vc.outro) assContent = appendOutroToAss(assContent, totalDuration, vc.outroText?.trim() || undefined);
+    }
+
     const subtitlePath = path.join(projectDir, "subtitles.ass");
     fs.writeFileSync(subtitlePath, assContent);
 
@@ -294,7 +337,7 @@ export async function runPipeline(projectId: number): Promise<void> {
       ? [hookSegmentPath, ...segmentPaths]
       : segmentPaths;
 
-    const totalDuration = hookDuration + voiceoverDuration;
+    const uniquify = vc ? { mirror: !!vc.mirror, noise: Number(vc.noise) || 0 } : null;
 
     const sandwichStart = Date.now();
     await createSandwichVideo(
@@ -306,7 +349,9 @@ export async function runPipeline(projectId: number): Promise<void> {
       totalDuration,
       project.isVerticalSource,
       project.cropType,
-      project.logoPosition === "top-left" ? "top-left" : "top-right"
+      (vc?.logoPosition ?? project.logoPosition) === "top-left" ? "top-left" : "top-right",
+      (vc?.logoLayout as any) ?? (project.logoLayout as any) ?? null,
+      uniquify
     );
     console.log(`[pipeline] Sandwich creation (rendering) took ${((Date.now() - sandwichStart)/1000).toFixed(1)}s`);
 

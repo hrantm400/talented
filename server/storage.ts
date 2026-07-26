@@ -13,6 +13,15 @@ import { db } from "./db";
 import { projects } from "@shared/schema";
 import { eq, desc } from "drizzle-orm";
 
+// Registered by the app at startup (see setProjectTerminalHook). Fired whenever
+// a project reaches a terminal status so features like the Telegram batch
+// summary can react — without storage importing them (avoids an import cycle).
+type ProjectTerminalHook = (project: Project) => void;
+let projectTerminalHook: ProjectTerminalHook | null = null;
+export function setProjectTerminalHook(fn: ProjectTerminalHook) {
+  projectTerminalHook = fn;
+}
+
 export class DatabaseStorage implements IStorage {
   async createProject(project: InsertProject): Promise<Project> {
     const [newProject] = await db.insert(projects).values({
@@ -30,7 +39,6 @@ export class DatabaseStorage implements IStorage {
       logoPosition: project.logoPosition || "top-right",
       voiceoverDuration: project.voiceoverDuration || null,
       transcription: project.transcription || null,
-      timecodes: project.timecodes || null,
       mixedAudioPath: project.mixedAudioPath || null,
       captionVideoPath: project.captionVideoPath || null,
       captionStyle: project.captionStyle || "capcut_green",
@@ -40,6 +48,15 @@ export class DatabaseStorage implements IStorage {
       hookTimecode: project.hookTimecode || null,
       originalVideoUrl: project.originalVideoUrl || null,
       shortVideoUrl: project.shortVideoUrl || null,
+      logoLayout: project.logoLayout ?? null,
+      timecodes: project.timecodes ?? null,
+      hookTitle: project.hookTitle ?? null,
+      variantConfig: project.variantConfig ?? null,
+      batchId: project.batchId ?? null,
+      sheetSourceNumber: project.sheetSourceNumber ?? null,
+      sheetVariantLabel: project.sheetVariantLabel ?? null,
+      aiAnalysisVideoPath: project.aiAnalysisVideoPath ?? null,
+      musicAttribution: project.musicAttribution ?? null,
     }).returning();
     return newProject;
   }
@@ -64,6 +81,15 @@ export class DatabaseStorage implements IStorage {
       .set(data)
       .where(eq(projects.id, id))
       .returning();
+    // Notify the terminal hook when this update just moved the project into a
+    // final state — used for the per-user batch-completion Telegram summary.
+    if (
+      updated &&
+      (data.status === "complete" || data.status === "failed") &&
+      projectTerminalHook
+    ) {
+      try { projectTerminalHook(updated); } catch (e) { console.error("[terminalHook] failed:", e); }
+    }
     return updated;
   }
 

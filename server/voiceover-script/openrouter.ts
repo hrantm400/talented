@@ -113,7 +113,7 @@ export async function generateViralVoiceoverScript(
   // compress + base64. We start on the preferred path and switch to fallback
   // if Gemini keeps returning "Provider returned error" (a flaky upstream).
   const stats = fs.statSync(videoPath);
-  const publicUrl = toPublicMediaUrl(videoPath);
+  const publicUrl = await toPublicMediaUrl(videoPath);
   let dataUrl: string;
   let usingUrlPath = !!publicUrl;
 
@@ -156,7 +156,12 @@ export async function generateViralVoiceoverScript(
         ],
       },
     ],
-    max_tokens: 1024,
+    // Reasoning models (Gemini 2.5 Pro, etc.) emit thinking tokens that eat
+    // into max_tokens; left unbounded with a tiny cap they return reasoning
+    // instead of the script. Keep reasoning low + excluded and give the answer
+    // generous headroom.
+    max_tokens: 4096,
+    reasoning: { effort: "low", exclude: true },
   });
 
   // Retry the request up to 3 times on transient upstream failures (empty
@@ -166,7 +171,7 @@ export async function generateViralVoiceoverScript(
   const RETRYABLE_MSG = /Unexpected end of JSON input|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|aborted|empty body|Provider returned error/i;
   // URL-specific errors that should trigger the base64 fallback before any
   // further retries.
-  const URL_FALLBACK_ERR = /Provider returned error|fetch failed|invalid.*url|unable to access|failed to fetch|400/i;
+  const URL_FALLBACK_ERR = /Provider returned error|fetch failed|invalid.*url|unable to access|failed to fetch|400|ROBOTED|robots|Cannot fetch content/i;
   const MAX_ATTEMPTS = 3;
 
   let lastErr: any;

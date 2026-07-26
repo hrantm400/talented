@@ -6,7 +6,7 @@ import { promisify } from "util";
 import {
   openRouterChat,
 } from "./openrouter";
-import { getVideoModel, getWhisperModel, getOpenRouterKey } from "../keys";
+import { getVideoModel, getWhisperModel, getOpenRouterKey, getSegmentsModel } from "../keys";
 import { toPublicMediaUrl } from "./public-url";
 
 const execFileAsync = promisify(execFile);
@@ -27,6 +27,22 @@ function resolveWhisperScriptPath(): string {
   throw new Error(
     "Whisper helper script was not found. Expected server/pipeline/whisper-transcribe.py in the project root.",
   );
+}
+
+function resolvePythonBinaryPath(): string {
+  const candidates = [
+    path.join(process.cwd(), "venv", "bin", "python3"),
+    path.join(process.cwd(), "venv", "bin", "python"),
+    path.join(process.cwd(), "venv", "Scripts", "python.exe"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "python";
 }
 
 
@@ -165,12 +181,13 @@ async function getAudioDurationSec(audioPath: string): Promise<number> {
 
 async function runLocalWhisper(audioPath: string): Promise<TranscriptionResult> {
   const scriptPath = resolveWhisperScriptPath();
+  const pythonBinary = resolvePythonBinaryPath();
   const modelSize = process.env.WHISPER_MODEL || "base";
-  console.log(`[transcribeAudio] Local faster-whisper (${modelSize}) on: ${audioPath}`);
+  console.log(`[transcribeAudio] Local faster-whisper (${modelSize}) on: ${audioPath} using ${pythonBinary}`);
 
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("python", [scriptPath, audioPath, modelSize], {
+    ({ stdout } = await execFileAsync(pythonBinary, [scriptPath, audioPath, modelSize], {
       timeout: 300000,
     }));
   } catch (error) {
@@ -497,7 +514,7 @@ export async function curateVideoSegments(
   //   2. FALLBACK  — base64-encoded compressed copy, used when (a) we can't
   //      build a public URL (file outside served dirs), or (b) the URL
   //      approach keeps returning "Provider returned error" from Gemini.
-  const publicUrl = toPublicMediaUrl(sourceVideoPath);
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
   let analysisVideoPath: string | null = null;
   let videoUrlForRequest: string;
   let usingUrlPath = !!publicUrl;
@@ -513,7 +530,7 @@ export async function curateVideoSegments(
 
   // Lazily compress + base64 the source video the first time the URL path
   // fails with a URL-specific error from the provider.
-  const URL_FALLBACK_ERR = /Provider returned error|fetch failed|invalid.*url|unable to access|failed to fetch|400/i;
+  const URL_FALLBACK_ERR = /Provider returned error|fetch failed|invalid.*url|unable to access|failed to fetch|400|ROBOTED|robots|Cannot fetch content/i;
   const switchToBase64Fallback = async (): Promise<void> => {
     if (!usingUrlPath) return; // already on base64
     console.warn(`[curateVideoSegments] URL approach kept failing — falling back to base64 (compressing source).`);
@@ -629,6 +646,34 @@ Maximum timestamp: ${formatTimestamp(videoDuration)}.
         throw new Error("All Gemini segments were too short after normalization");
       }
 
+      // --- CAP TOTAL DURATION (Anti-Overflow) ---
+      // The model sometimes returns a few GIANT ranges (e.g. 00:00:58→00:05:28)
+      // which the 4s-chunk split above turns into 100+ segments — an 8-minute
+      // concat that ffmpeg gets KILLED on. Keep only enough to cover the target
+      // plus a small buffer; trim the segment that crosses the limit.
+      const MAX_TOTAL = targetDuration + 6;
+      {
+        const capped: Array<{ start: string; end: string }> = [];
+        let acc = 0;
+        for (const seg of normalized) {
+          if (acc >= MAX_TOTAL) break;
+          const s = parseTimestamp(seg.start);
+          let e = parseTimestamp(seg.end);
+          if (acc + (e - s) > MAX_TOTAL) {
+            e = s + (MAX_TOTAL - acc);
+            if (e - s >= 1) capped.push({ start: formatTimestamp(s), end: formatTimestamp(e) });
+            break;
+          }
+          capped.push(seg);
+          acc += e - s;
+        }
+        if (capped.length > 0 && capped.length < normalized.length) {
+          console.warn(`[curateVideoSegments] capped ${normalized.length} → ${capped.length} segments (~${acc.toFixed(0)}s) to avoid an oversized concat`);
+        }
+        normalized.length = 0;
+        normalized.push(...capped);
+      }
+
       // --- AUTO-FILL FAILSAFE (Anti-Freeze) ---
       // Mathematically guarantees we have at least targetDuration seconds of video
       const finalSegments: Array<{ start: string; end: string }> = [];
@@ -686,12 +731,25 @@ Maximum timestamp: ${formatTimestamp(videoDuration)}.
       }
 
       if (isLast) {
-        // Clean up temp file before throwing
         if (analysisVideoPath) {
           try { fs.unlinkSync(analysisVideoPath); } catch {}
           try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
         }
-        throw new Error(`Failed to get valid Gemini segments after ${maxAttempts} attempts. Last error: ${errMsg}`);
+        console.warn(`[curateVideoSegments] AI curation unavailable (${errMsg}), generating fallback uniform 4s segments...`);
+        const fallbackSegments: Array<{ start: string; end: string }> = [];
+        let t = 0;
+        let srcPos = 0;
+        while (t < targetDuration) {
+          const dur = Math.min(4, targetDuration - t);
+          const segStart = srcPos % Math.max(1, videoDuration - dur);
+          fallbackSegments.push({
+            start: formatTimestamp(segStart),
+            end: formatTimestamp(segStart + dur),
+          });
+          t += dur;
+          srcPos += 12; // jump 12s in source video for high visual variety
+        }
+        return fallbackSegments;
       }
       const delayMs = 5000 * (attempt + 1);
       console.warn(`[curateVideoSegments] Retrying in ${delayMs / 1000}s...`);
@@ -707,6 +765,577 @@ Maximum timestamp: ${formatTimestamp(videoDuration)}.
   return curationResult;
 }
 
+// ── Factory: N DISTINCT narratives in ONE call ──
+
+/**
+ * Pick `count` DIFFERENT shorts from one video in a single Gemini call. Each
+ * short is a [setup, epic] pair; the pairs must NOT overlap each other and must
+ * never use the last 15% (no ending/spoiler). Used by the factory so multiple
+ * no-voiceover variants show genuinely different moments. Best-effort: if the
+ * model returns fewer sets, the missing ones fall back to a single narrative.
+ */
+export async function curateMultipleNarratives(
+  sourceVideoPath: string,
+  targetDuration: number,
+  count: number,
+  userId?: number | null
+): Promise<Array<Array<{ start: string; end: string }>>> {
+  const n = Math.max(1, Math.min(8, count));
+  if (n === 1) {
+    return [await curateNarrativeSegments(sourceVideoPath, targetDuration, userId)];
+  }
+
+  let videoDuration = 0;
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", sourceVideoPath,
+    ]);
+    videoDuration = parseFloat(stdout.trim()) || 0;
+  } catch (error) {
+    throw new Error(getCommandErrorMessage(error, "ffprobe"));
+  }
+  const cutoffSec = videoDuration > 0 ? videoDuration * 0.85 : 0;
+  const maxStamp = cutoffSec > 0 ? formatTimestamp(cutoffSec) : formatTimestamp(videoDuration);
+
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
+  let analysisVideoPath: string | null = null;
+  let videoUrl: string;
+  if (publicUrl) {
+    videoUrl = publicUrl;
+  } else {
+    analysisVideoPath = await prepareAnalysisVideo(sourceVideoPath, videoDuration);
+    const buf = fs.readFileSync(analysisVideoPath);
+    videoUrl = `data:video/mp4;base64,${buf.toString("base64")}`;
+  }
+  const cleanup = () => {
+    if (analysisVideoPath) {
+      try { fs.unlinkSync(analysisVideoPath); } catch {}
+      try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
+    }
+  };
+
+  const prompt = `You are a MASTER editor of viral talent-show shorts (America's Got Talent style). Watch the FULL video.
+
+Produce ${n} DIFFERENT ${Math.round(targetDuration)}-second shorts. Each short = EXACTLY TWO clips:
+1) a SETUP clip (~25-40% of total): short build-up / dialogue that creates curiosity.
+2) an EPIC clip (the rest): the most jaw-dropping, high-energy, emotional payoff.
+
+ABSOLUTE RULES:
+- The ${n} shorts must use DIFFERENT moments — do NOT reuse the same setup or epic across shorts. Spread them across the video.
+- NEVER use footage from the last 15% (no ending, no result reveal). Maximum timestamp: ${maxStamp}.
+- Each short's two clips should sum to between ${Math.ceil(targetDuration)} and ${Math.ceil(targetDuration + 4)} seconds.
+- Pick clean, in-focus, high-impact footage. No title cards/logos.
+
+OUTPUT — return ONLY a JSON array of ${n} shorts. Each short is an array of exactly two objects (first=setup, second=epic), timestamps HH:MM:SS:
+[[{"start":"00:01:10","end":"00:01:18"},{"start":"00:03:40","end":"00:04:00"}], [{"start":"00:00:30","end":"00:00:40"},{"start":"00:05:10","end":"00:05:28"}]]`;
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "video_url"; video_url: { url: string } }
+  > = [
+    { type: "video_url", video_url: { url: videoUrl } },
+    { type: "text", text: prompt },
+  ];
+
+  const clampSet = (segs: Array<{ start: string; end: string }>): Array<{ start: string; end: string }> => {
+    const norm: Array<{ start: string; end: string }> = [];
+    for (const s of (segs || []).slice(0, 2)) {
+      let a = parseTimestamp(s.start);
+      let b = parseTimestamp(s.end);
+      if (cutoffSec > 0) { a = Math.min(a, cutoffSec - 1); b = Math.min(b, cutoffSec); }
+      if (b - a >= 1) norm.push({ start: formatTimestamp(Math.max(0, a)), end: formatTimestamp(b) });
+    }
+    return norm;
+  };
+
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let responseText = "";
+    try {
+      const model = await getSegmentsModel(userId);
+      responseText = await openRouterChat(
+        model,
+        [{ role: "user", content }],
+        { max_tokens: 8192, timeout_ms: 300_000, userId }
+      );
+      const m = responseText.match(/\[[\s\S]*\]/);
+      if (!m) throw new Error("no JSON array");
+      const raw = m[0].replace(/,\s*([}\]])/g, "$1");
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("not an array");
+      // Accept BOTH shapes the model might return:
+      //   nested  [[{setup},{epic}], [{setup},{epic}]]
+      //   flat    [{setup},{epic},{setup},{epic}]  → chunk into pairs
+      let setsRaw: any[][];
+      if (Array.isArray(parsed[0])) {
+        setsRaw = parsed;
+      } else {
+        setsRaw = [];
+        for (let i = 0; i < parsed.length; i += 2) setsRaw.push(parsed.slice(i, i + 2));
+      }
+      const sets = setsRaw
+        .map((s: any) => clampSet(s))
+        .filter((s: Array<{ start: string; end: string }>) => s.length > 0);
+      if (sets.length === 0) throw new Error("no valid sets after clamping");
+      cleanup();
+      // Pad to `n` by re-using single-narrative results if the model returned fewer.
+      while (sets.length < n) {
+        sets.push(await curateNarrativeSegments(sourceVideoPath, targetDuration, userId));
+      }
+      console.log(`[curateMultipleNarratives] produced ${sets.length}/${n} distinct sets`);
+      return sets.slice(0, n);
+    } catch (err) {
+      const isLast = attempt === maxAttempts - 1;
+      console.warn(`[curateMultipleNarratives] attempt ${attempt + 1}/${maxAttempts} failed: ${err instanceof Error ? err.message : err}`);
+      if (isLast) {
+        cleanup();
+        // Fall back to N independent single-narrative calls.
+        const out: Array<Array<{ start: string; end: string }>> = [];
+        for (let i = 0; i < n; i++) out.push(await curateNarrativeSegments(sourceVideoPath, targetDuration, userId));
+        return out;
+      }
+      await sleep(4000 * (attempt + 1));
+    }
+  }
+  cleanup();
+  throw new Error("curateMultipleNarratives: unreachable");
+}
+
+// ── Narrative curation (No-Voiceover variant): setup + epic, no ending ──
+
+/**
+ * Build a short from EXACTLY TWO clips taken from the full video:
+ *   1. a SETUP clip (dialogue/build-up that creates curiosity)
+ *   2. an EPIC clip (the jaw-dropping / high-energy payoff)
+ * The ending of the source is never used (no spoiler / no result reveal).
+ * Returns ordered timecodes [setup, epic] with original audio intact downstream.
+ */
+export async function curateNarrativeSegments(
+  sourceVideoPath: string,
+  targetDuration: number,
+  userId?: number | null
+): Promise<Array<{ start: string; end: string }>> {
+  // Probe duration to compute the "no ending" cutoff (last 15% is off-limits).
+  let videoDuration = 0;
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", sourceVideoPath,
+    ]);
+    videoDuration = parseFloat(stdout.trim()) || 0;
+  } catch (error) {
+    throw new Error(getCommandErrorMessage(error, "ffprobe"));
+  }
+  const cutoffSec = videoDuration > 0 ? videoDuration * 0.85 : 0; // avoid last 15%
+
+  // Video delivery: public URL preferred, base64 fallback.
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
+  let analysisVideoPath: string | null = null;
+  let videoUrl: string;
+  if (publicUrl) {
+    videoUrl = publicUrl;
+  } else {
+    analysisVideoPath = await prepareAnalysisVideo(sourceVideoPath, videoDuration);
+    const buf = fs.readFileSync(analysisVideoPath);
+    videoUrl = `data:video/mp4;base64,${buf.toString("base64")}`;
+  }
+
+  const maxStamp = cutoffSec > 0 ? formatTimestamp(cutoffSec) : formatTimestamp(videoDuration);
+  const setupLo = Math.max(4, Math.round(targetDuration * 0.25));
+  const setupHi = Math.max(setupLo + 2, Math.round(targetDuration * 0.4));
+
+  const prompt = `You are a MASTER editor of viral talent-show shorts (America's Got Talent style). Watch the FULL video.
+
+Build a ${Math.round(targetDuration)}-second short from EXACTLY TWO clips:
+
+1) SETUP clip (~${setupLo}-${setupHi}s): a short bit of talking / build-up that creates curiosity — a judge asking a question, the contestant introducing themselves, an emotional or tense conversation, or the calm before the performance. It must make the viewer want to keep watching.
+
+2) EPIC clip (the rest, ~${Math.round(targetDuration) - setupLo}s): the single most JAW-DROPPING, HIGH-ENERGY, emotional moment — the performance climax, the golden-buzzer slam, the crowd erupting, tears, a stunning reveal of talent.
+
+ABSOLUTE RULES:
+- NEVER use footage from the last 15% of the video. Maximum allowed timestamp: ${maxStamp}.
+- Do NOT reveal the ending: no final result, no winner announcement, no "yes/no" verdict, no closing/credits. Leave them wanting the full video.
+- The two clips should feel like a mini-story: intrigue → payoff.
+- Pick visually clean, in-focus, high-impact footage. No blurry shots, no title cards, no logos.
+
+The SUM of both clips must be between ${Math.ceil(targetDuration)} and ${Math.ceil(targetDuration + 4)} seconds.
+
+OUTPUT — return ONLY a JSON array of exactly two objects, first = SETUP, second = EPIC, timestamps in HH:MM:SS:
+[{"start":"00:01:10","end":"00:01:18"},{"start":"00:03:40","end":"00:04:00"}]`;
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "video_url"; video_url: { url: string } }
+  > = [
+    { type: "video_url", video_url: { url: videoUrl } },
+    { type: "text", text: prompt },
+  ];
+
+  const cleanup = () => {
+    if (analysisVideoPath) {
+      try { fs.unlinkSync(analysisVideoPath); } catch {}
+      try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
+    }
+  };
+
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let responseText = "";
+    try {
+      // Segments is the quality-critical task → its own (optionally stronger)
+      // model. Falls back to the video model when unset.
+      const model = await getSegmentsModel(userId);
+      responseText = await openRouterChat(
+        model,
+        [{ role: "user", content }],
+        { max_tokens: 8192, timeout_ms: 300_000, userId }
+      );
+      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error("Gemini did not return JSON segments");
+      const raw = jsonMatch[0].replace(/,\s*([}\]])/g, "$1");
+      let segs: Array<{ start: string; end: string }> = JSON.parse(raw);
+      if (!Array.isArray(segs) || segs.length === 0) throw new Error("Empty segments");
+
+      // Normalize: clamp to the cutoff, drop invalid, keep at most 2.
+      const norm: Array<{ start: string; end: string }> = [];
+      for (const s of segs.slice(0, 2)) {
+        let a = parseTimestamp(s.start);
+        let b = parseTimestamp(s.end);
+        if (cutoffSec > 0) {
+          a = Math.min(a, cutoffSec - 1);
+          b = Math.min(b, cutoffSec);
+        }
+        if (b - a >= 1) norm.push({ start: formatTimestamp(Math.max(0, a)), end: formatTimestamp(b) });
+      }
+      if (norm.length === 0) throw new Error("All narrative segments invalid after clamping");
+
+      cleanup();
+      const total = norm.reduce((s, x) => s + (parseTimestamp(x.end) - parseTimestamp(x.start)), 0);
+      console.log(`[curateNarrativeSegments] ${norm.length} clip(s), total ${total.toFixed(1)}s (target ${targetDuration}s, cutoff ${maxStamp})`);
+      return norm;
+    } catch (err) {
+      const isLast = attempt === maxAttempts - 1;
+      console.warn(`[curateNarrativeSegments] attempt ${attempt + 1}/${maxAttempts} failed: ${err instanceof Error ? err.message : err}`);
+      if (responseText) console.warn(`[curateNarrativeSegments] raw: ${responseText.slice(0, 200)}`);
+      if (isLast) { cleanup(); throw err; }
+      await sleep(4000 * (attempt + 1));
+    }
+  }
+  cleanup();
+  throw new Error("curateNarrativeSegments: unreachable");
+}
+
+// ── Auto music: classify the video's mood for background-music selection ──
+
+export const MOOD_TAGS = [
+  "epic",
+  "emotional",
+  "uplifting",
+  "dramatic",
+  "energetic",
+  "happy",
+  "chill",
+  "dark",
+] as const;
+
+/**
+ * Ask the vision model to classify the video's overall vibe into one of the
+ * MOOD_TAGS, used to pick a fitting background track. Best-effort: returns
+ * "epic" if the model misbehaves or the call fails.
+ */
+export async function detectVideoMood(
+  sourceVideoPath: string,
+  userId?: number | null
+): Promise<string> {
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
+  let analysisVideoPath: string | null = null;
+  let videoUrl: string;
+
+  if (publicUrl) {
+    videoUrl = publicUrl;
+  } else {
+    let dur = 0;
+    try {
+      const { stdout } = await execFileAsync("ffprobe", [
+        "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", sourceVideoPath,
+      ]);
+      dur = parseFloat(stdout.trim()) || 0;
+    } catch {}
+    analysisVideoPath = await prepareAnalysisVideo(sourceVideoPath, dur, 120);
+    const buf = fs.readFileSync(analysisVideoPath);
+    videoUrl = `data:video/mp4;base64,${buf.toString("base64")}`;
+  }
+
+  const prompt = `Classify the overall MOOD / VIBE of this video so we can choose fitting background music.
+Pick EXACTLY ONE word from this list (lowercase, nothing else):
+epic, emotional, uplifting, dramatic, energetic, happy, chill, dark
+
+Return ONLY that single word.`;
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "video_url"; video_url: { url: string } }
+  > = [
+    { type: "video_url", video_url: { url: videoUrl } },
+    { type: "text", text: prompt },
+  ];
+
+  let mood = "epic";
+  try {
+    const model = await getVideoModel(userId);
+    const resp = await openRouterChat(
+      model,
+      [{ role: "user", content }],
+      { max_tokens: 2048, timeout_ms: 120_000, userId }
+    );
+    const word = resp.trim().toLowerCase().replace(/[^a-z]/g, "");
+    if ((MOOD_TAGS as readonly string[]).includes(word)) {
+      mood = word;
+    } else {
+      console.warn(`[detectVideoMood] model returned "${resp.trim()}" — not in list, defaulting to "epic"`);
+    }
+  } catch (err: any) {
+    console.warn(`[detectVideoMood] failed, defaulting to "epic": ${err?.message || err}`);
+  } finally {
+    if (analysisVideoPath) {
+      try { fs.unlinkSync(analysisVideoPath); } catch {}
+      try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
+    }
+  }
+
+  console.log(`[detectVideoMood] detected mood: ${mood}`);
+  return mood;
+}
+
+// ── Combined mood + headline in ONE video call (cost saver) ──
+
+/**
+ * Single video call that returns BOTH the music mood and the viral headline.
+ * Replaces separate detectVideoMood + generateHookTitle calls (sends the
+ * video once instead of twice). Best-effort: missing/invalid fields fall back
+ * to { mood: "epic", title: "" }.
+ */
+export async function detectMoodAndTitle(
+  sourceVideoPath: string,
+  userId?: number | null
+): Promise<{ mood: string; title: string }> {
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
+  let analysisVideoPath: string | null = null;
+  let videoUrl: string;
+  if (publicUrl) {
+    videoUrl = publicUrl;
+  } else {
+    let dur = 0;
+    try {
+      const { stdout } = await execFileAsync("ffprobe", [
+        "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", sourceVideoPath,
+      ]);
+      dur = parseFloat(stdout.trim()) || 0;
+    } catch {}
+    analysisVideoPath = await prepareAnalysisVideo(sourceVideoPath, dur, 180);
+    const buf = fs.readFileSync(analysisVideoPath);
+    videoUrl = `data:video/mp4;base64,${buf.toString("base64")}`;
+  }
+
+  const prompt = `Analyze this talent-show video and return ONLY a JSON object with exactly two fields:
+
+{
+  "mood": one word for background music, EXACTLY one of: epic, emotional, uplifting, dramatic, energetic, happy, chill, dark
+  "title": a short VIRAL clickbait headline — 8 to 16 words, high emotion/curiosity, mentions what happens (e.g. a specific song/cover/talent), NO quotes, NO hashtags, NO emojis
+}
+
+Example: {"mood":"emotional","title":"She attempted the impossible! This miracle Whitney Houston cover left Simon Cowell in total shock!"}
+
+Return ONLY the JSON object, nothing else.`;
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "video_url"; video_url: { url: string } }
+  > = [
+    { type: "video_url", video_url: { url: videoUrl } },
+    { type: "text", text: prompt },
+  ];
+
+  let mood = "epic";
+  let title = "";
+  try {
+    const model = await getVideoModel(userId);
+    const resp = await openRouterChat(
+      model,
+      [{ role: "user", content }],
+      { max_tokens: 2048, timeout_ms: 120_000, userId }
+    );
+    const m = resp.match(/\{[\s\S]*\}/);
+    if (m) {
+      const parsed = JSON.parse(m[0].replace(/,\s*([}\]])/g, "$1"));
+      const moodWord = String(parsed.mood || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+      if ((MOOD_TAGS as readonly string[]).includes(moodWord)) mood = moodWord;
+      title = String(parsed.title || "").trim().replace(/^["'\s]+|["'\s]+$/g, "").replace(/\s+/g, " ");
+    } else {
+      console.warn(`[detectMoodAndTitle] no JSON in response: ${resp.slice(0, 160)}`);
+    }
+  } catch (err: any) {
+    console.warn(`[detectMoodAndTitle] failed: ${err?.message || err}`);
+  } finally {
+    if (analysisVideoPath) {
+      try { fs.unlinkSync(analysisVideoPath); } catch {}
+      try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
+    }
+  }
+  console.log(`[detectMoodAndTitle] mood="${mood}" title="${title}"`);
+  return { mood, title };
+}
+
+// ── Viral headline (No-Voiceover top card) ──
+
+/**
+ * Generate ONE short, punchy clickbait headline for the clip — shown as the
+ * animated top card. Best-effort: returns "" on failure (card is skipped).
+ */
+export async function generateHookTitle(
+  sourceVideoPath: string,
+  userId?: number | null
+): Promise<string> {
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
+  let analysisVideoPath: string | null = null;
+  let videoUrl: string;
+  if (publicUrl) {
+    videoUrl = publicUrl;
+  } else {
+    let dur = 0;
+    try {
+      const { stdout } = await execFileAsync("ffprobe", [
+        "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", sourceVideoPath,
+      ]);
+      dur = parseFloat(stdout.trim()) || 0;
+    } catch {}
+    analysisVideoPath = await prepareAnalysisVideo(sourceVideoPath, dur, 180);
+    const buf = fs.readFileSync(analysisVideoPath);
+    videoUrl = `data:video/mp4;base64,${buf.toString("base64")}`;
+  }
+
+  const prompt = `Write ONE short, punchy, VIRAL clickbait headline for this talent-show clip — the kind that makes people STOP SCROLLING.
+
+Rules:
+- 8 to 16 words, ONE or two short sentences.
+- High emotion / curiosity (shock, miracle, impossible, left the judges speechless, etc.).
+- Mention what actually happens (a specific song/cover/talent if visible).
+- NO quotes around the whole thing, no hashtags, no emojis.
+
+Example style: She attempted the impossible! This arresting "miracle" Whitney Houston cover just left Simon Cowell in total shock!
+
+Return ONLY the headline text.`;
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "video_url"; video_url: { url: string } }
+  > = [
+    { type: "video_url", video_url: { url: videoUrl } },
+    { type: "text", text: prompt },
+  ];
+
+  let title = "";
+  try {
+    const model = await getVideoModel(userId);
+    const resp = await openRouterChat(
+      model,
+      [{ role: "user", content }],
+      { max_tokens: 2048, timeout_ms: 120_000, userId }
+    );
+    title = resp.trim().replace(/^["'\s]+|["'\s]+$/g, "").replace(/\s+/g, " ");
+  } catch (err: any) {
+    console.warn(`[generateHookTitle] failed: ${err?.message || err}`);
+  } finally {
+    if (analysisVideoPath) {
+      try { fs.unlinkSync(analysisVideoPath); } catch {}
+      try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
+    }
+  }
+  console.log(`[generateHookTitle] "${title}"`);
+  return title;
+}
+
+/**
+ * Generate N DISTINCT viral headlines for the clip in ONE call — one per
+ * factory variant, so every short gets a DIFFERENT hook. Best-effort: returns
+ * whatever it parsed (may be fewer than n, or [] on failure).
+ */
+export async function generateMultipleHookTitles(
+  sourceVideoPath: string,
+  n: number,
+  userId?: number | null
+): Promise<string[]> {
+  if (n <= 0) return [];
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
+  let analysisVideoPath: string | null = null;
+  let videoUrl: string;
+  if (publicUrl) {
+    videoUrl = publicUrl;
+  } else {
+    let dur = 0;
+    try {
+      const { stdout } = await execFileAsync("ffprobe", [
+        "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", sourceVideoPath,
+      ]);
+      dur = parseFloat(stdout.trim()) || 0;
+    } catch {}
+    analysisVideoPath = await prepareAnalysisVideo(sourceVideoPath, dur, 180);
+    const buf = fs.readFileSync(analysisVideoPath);
+    videoUrl = `data:video/mp4;base64,${buf.toString("base64")}`;
+  }
+
+  const prompt = `Write ${n} DISTINCT short, punchy, VIRAL clickbait headlines for this talent-show clip. Each one is for a SEPARATE post, so they MUST feel different from each other.
+
+Rules:
+- Each headline: 8 to 16 words, one or two short sentences.
+- High emotion / curiosity (shock, miracle, impossible, left the judges speechless, etc.).
+- Each headline must take a DIFFERENT angle or emotion: e.g. #1 pure shock, #2 heartwarming, #3 mystery/curiosity, #4 "you won't believe what happens". Vary the hook, the wording and the focus.
+- Mention what actually happens (a specific song/cover/talent if visible).
+- NO quotes around each headline, no hashtags, no emojis.
+
+Return ONLY a JSON array of exactly ${n} strings, e.g. ["headline one","headline two"].`;
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "video_url"; video_url: { url: string } }
+  > = [
+    { type: "video_url", video_url: { url: videoUrl } },
+    { type: "text", text: prompt },
+  ];
+
+  let titles: string[] = [];
+  try {
+    const model = await getVideoModel(userId);
+    const resp = await openRouterChat(
+      model,
+      [{ role: "user", content }],
+      { max_tokens: 8192, timeout_ms: 180_000, userId }
+    );
+    const clean = (s: string) => s.trim().replace(/^["'\s]+|["'\s]+$/g, "").replace(/\s+/g, " ");
+    const m = resp.match(/\[[\s\S]*\]/);
+    if (m) {
+      try {
+        const arr = JSON.parse(m[0].replace(/,\s*\]/g, "]"));
+        if (Array.isArray(arr)) titles = arr.map((x) => clean(String(x))).filter(Boolean);
+      } catch {}
+    }
+    if (titles.length === 0) {
+      // Fallback: one headline per non-empty line (strip list markers/quotes).
+      titles = resp.split("\n")
+        .map((l) => clean(l.replace(/^[\s\-\d.)\]]+/, "")))
+        .filter((l) => l.length > 8);
+    }
+  } catch (err: any) {
+    console.warn(`[generateMultipleHookTitles] failed: ${err?.message || err}`);
+  } finally {
+    if (analysisVideoPath) {
+      try { fs.unlinkSync(analysisVideoPath); } catch {}
+      try { fs.rmdirSync(path.dirname(analysisVideoPath)); } catch {}
+    }
+  }
+  console.log(`[generateMultipleHookTitles] got ${titles.length}/${n} distinct titles`);
+  return titles.slice(0, n);
+}
+
 // ── Hook Intro: find the most engaging moment ──
 
 export async function findHookMoment(
@@ -717,7 +1346,7 @@ export async function findHookMoment(
   console.log(`[findHookMoment] Looking for hook in first 60s of the ${videoDuration.toFixed(1)}s video...`);
 
   // Prefer public URL — fall back to compressed base64 on URL-specific errors.
-  const publicUrl = toPublicMediaUrl(sourceVideoPath);
+  const publicUrl = await toPublicMediaUrl(sourceVideoPath);
   let analysisVideoPath: string | null = null;
   let videoUrlForRequest: string;
   let usingUrlPath = !!publicUrl;
@@ -731,7 +1360,7 @@ export async function findHookMoment(
     videoUrlForRequest = `data:video/mp4;base64,${buf.toString("base64")}`;
   }
 
-  const URL_FALLBACK_ERR = /Provider returned error|fetch failed|invalid.*url|unable to access|failed to fetch|400/i;
+  const URL_FALLBACK_ERR = /Provider returned error|fetch failed|invalid.*url|unable to access|failed to fetch|400|ROBOTED|robots|Cannot fetch content/i;
   const switchToBase64Fallback = async (): Promise<void> => {
     if (!usingUrlPath) return;
     console.warn(`[findHookMoment] URL approach failed — falling back to base64 (compressing source first 60s).`);
@@ -782,7 +1411,7 @@ Maximum timestamp: ${formatTimestamp(Math.min(videoDuration, 60))}.`;
       responseText = await openRouterChat(
         model,
         [{ role: "user", content: buildContent() }],
-        { max_tokens: 2048, timeout_ms: 120_000, userId }
+        { max_tokens: 8192, timeout_ms: 120_000, userId }
       );
       console.log(`[findHookMoment] Received response length: ${responseText.length}`);
       break;
